@@ -253,17 +253,17 @@ def main(args):
     # -----------------------------------------------------------
     # 5. 匹配器和损失
     # -----------------------------------------------------------
-    matcher = HungarianMatcher(cost_class=args.label_loss_coef, 
-                               cost_span=args.span_loss_coef, 
-                               cost_giou=args.giou_loss_coef)
+    matcher = HungarianMatcher(cost_class=2, 
+                               cost_span=5, 
+                               cost_giou=2)
     
-    weight_dict = {'loss_labels': args.label_loss_coef, # 默认为 1.0
-                   'loss_span': args.span_loss_coef, # 默认为 10.0
-                   'loss_giou': args.giou_loss_coef, # 默认为 4.0
+    weight_dict = {'loss_labels': 2.0, # 默认为 1.0
+                   'loss_span': 5.0, # 默认为 10.0
+                   'loss_giou': 2.0, # 默认为 4.0
                    'loss_quality': 2.0, # 
-                   'loss_recfw': 0.1,   # 
+                   'loss_recfw': 0.15,   # 
                    'loss_contrastive': 0.5, #  对比损失权重，默认为 1.0
-                   'loss_saliency': 0.1} # 0.2
+                   'loss_saliency': 0.2} # 0.2
 
     if args.aux_loss:
         aux_weight_dict = {}
@@ -289,16 +289,16 @@ def main(args):
 
     # 将 StepLR 替换为 MultiStepLR
     # main.py
-    #lr_scheduler = torch.optim.lr_scheduler.MultiStepLR(
-    #    optimizer,
-    #    milestones=[60, 80],  
-    #    gamma=0.5             
-    #)
-    lr_scheduler = torch.optim.lr_scheduler.StepLR(
+    lr_scheduler = torch.optim.lr_scheduler.MultiStepLR(
         optimizer,
-        step_size=args.lr_drop, # 30
-        gamma=0.1
+        milestones=[60, 80],  
+        gamma=0.5             
     )
+    #lr_scheduler = torch.optim.lr_scheduler.StepLR(
+    #    optimizer,
+    #    step_size=args.lr_drop, # 30
+    #    gamma=0.1
+    #)
     # -----------------------------------------------------------
     # 7. 训练循环
     # -----------------------------------------------------------

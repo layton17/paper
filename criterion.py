@@ -157,30 +157,51 @@ class SetCriterion(nn.Module):
         return {'loss_saliency': loss}
 
     def loss_quality(self, outputs, targets, indices, num_spans):
+        """
+        [升级版] 模仿 BAM-DETR 的分层质量损失
+        区分 >0.7 (Pos), 0.3-0.7 (Middle), <0.3 (Neg) 的样本
+        """
         assert 'pred_quality' in outputs
         src_quality = outputs['pred_quality']
         idx = self._get_src_permutation_idx(indices)
         
-        # [侦探检查]
-        idx = self._check_and_clamp(idx, src_quality.shape, name="loss_quality")
-        b_idx, s_idx = idx
-
-        matched_quality = src_quality[b_idx, s_idx].squeeze(-1)
-        src_spans = outputs['pred_spans'][b_idx, s_idx]
+        # 1. 获取预测和 GT
+        # 注意：这里我们只关心匹配到的 Query 的质量预测
+        b_idx, s_idx = self._safe_clamp_indices(idx, src_quality.shape[1])
+        pred_quality = src_quality[b_idx, s_idx].squeeze(-1)
         
+        # 2. 计算真实的 IoU (GT IoU)
+        src_spans = outputs['pred_spans'][b_idx, s_idx]
         target_spans_cw = torch.cat([t['spans'][i] for t, (_, i) in zip(targets, indices)], dim=0)
         target_spans_cw = torch.clamp(target_spans_cw, max=1.0)
-        target_spans_xx = span_cxw_to_xx(target_spans_cw) 
+        target_spans_xx = span_cxw_to_xx(target_spans_cw)
         
+        # 计算 IoU
         inter_min = torch.max(src_spans[:, 0], target_spans_xx[:, 0])
         inter_max = torch.min(src_spans[:, 1], target_spans_xx[:, 1])
         inter_len = (inter_max - inter_min).clamp(min=0)
         union_len = (src_spans[:, 1] - src_spans[:, 0]) + \
                     (target_spans_xx[:, 1] - target_spans_xx[:, 0]) - inter_len
         gt_iou = inter_len / (union_len + 1e-6)
-
-        loss_quality = F.l1_loss(matched_quality.sigmoid(), gt_iou.detach(), reduction='sum')
-        return {'loss_quality': loss_quality / num_spans}
+        
+        # 3. [核心修改] 分层加权计算 Loss
+        # 将样本分为三类：高质量(>0.7), 中等(0.3~0.7), 低质量(<0.3)
+        pos_ind = torch.nonzero(gt_iou > 0.7).squeeze(1)
+        mid_ind = torch.nonzero((gt_iou <= 0.7) & (gt_iou > 0.3)).squeeze(1)
+        neg_ind = torch.nonzero(gt_iou <= 0.3).squeeze(1)
+        
+        loss_tensor = F.l1_loss(pred_quality.sigmoid(), gt_iou.detach(), reduction='none')
+        
+        # 平衡三类样本的贡献 (避免某一类样本过多主导 Loss)
+        # 如果某一类没有样本，则 Loss 为 0
+        loss_pos = loss_tensor[pos_ind].mean() if len(pos_ind) > 0 else torch.tensor(0.0, device=loss_tensor.device)
+        loss_mid = loss_tensor[mid_ind].mean() if len(mid_ind) > 0 else torch.tensor(0.0, device=loss_tensor.device)
+        loss_neg = loss_tensor[neg_ind].mean() if len(neg_ind) > 0 else torch.tensor(0.0, device=loss_tensor.device)
+        
+        # 平均三个部分的 Loss
+        total_loss = (loss_pos + loss_mid + loss_neg) / 3.0
+        
+        return {'loss_quality': total_loss}
 
     def loss_recfw(self, outputs, targets, indices, num_spans):
         if 'recfw_words_logit' not in outputs or outputs['recfw_words_logit'] is None:
@@ -291,3 +312,23 @@ class SetCriterion(nn.Module):
                     l_dict = {k + f'_{i}': v for k, v in l_dict.items()}
                     losses.update(l_dict)
         return losses
+    
+    def _get_src_permutation_idx(self, indices):
+        # permute predictions following indices
+        # 将 indices (List[Tuple]) 转换为 Tensor 格式，用于索引
+        batch_idx = torch.cat([torch.full_like(src, i) for i, (src, _) in enumerate(indices)])
+        src_idx = torch.cat([src for (src, _) in indices])
+        return batch_idx, src_idx
+
+    def _safe_clamp_indices(self, idx, max_len):
+        """
+        防止索引越界的安全辅助函数。
+        理论上 Matcher 返回的索引不应越界，但在某些极端情况下（如 NaN 导致 Matcher 异常），
+        可能会出现非法索引，这里做一个强制保护。
+        """
+        batch_idx, src_idx = idx
+        if src_idx.numel() > 0: # 只有当有匹配项时才检查
+            if src_idx.max() >= max_len:
+                # print(f"Warning: Matcher returned index {src_idx.max()} >= {max_len}. Clamping...")
+                src_idx = src_idx.clamp(max=max_len - 1)
+        return batch_idx, src_idx
