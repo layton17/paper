@@ -97,7 +97,8 @@ def train_one_epoch(model, criterion, data_loader, optimizer, device, epoch):
             'L': f"{losses.item():.2f}",     # 总 Weighted Loss
             'Cls': f"{l_label:.3f}",         # Label/Classification
             'Span': f"{l_span:.3f}",         # Span L1
-            'GIoU': f"{l_giou:.3f}",         # GIoU
+            'GIoU': f"{l_giou:.3f}",
+            'Qual': f"{l_qual:.3f}",
             'Sal': f"{l_sal:.2f}",           # Saliency (注意这里保留2位小数因为数值较大)
             'Cont': f"{l_cont:.3f}",         # Contrastive
             'Rec': f"{l_rec:.3f}"            # RecFW
@@ -263,7 +264,7 @@ def main(args):
                    'loss_quality': 2.0, # 
                    'loss_recfw': 0.15,   # 
                    'loss_contrastive': 0.5, #  对比损失权重，默认为 1.0
-                   'loss_saliency': 0.2} # 0.2
+                   'loss_saliency': 0.1} # 0.2
 
     if args.aux_loss:
         aux_weight_dict = {}

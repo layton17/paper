@@ -27,7 +27,7 @@ def evaluate(model, data_loader, device):
         prob = F.softmax(pred_logits, -1)
         scores = prob[..., 0]
         quality_scores = pred_quality.sigmoid().squeeze(-1)
-        combined_scores = scores * (quality_scores ** 1.2)
+        combined_scores = (scores ** 2.0) * (quality_scores ** 2.0)
         #combined_scores = scores
         
         # [修正] pred_spans 已经是 start/end，不需要转换！
