@@ -144,7 +144,19 @@ class MESM_W2W_BAM(nn.Module):
 
         dataset_name = getattr(args, 'dataset_name', 'charades')
         self.w2w_context = MultiContextPerception(args.hidden_dim, args.nheads, dataset_name=dataset_name)
-        self.w2w_gate = nn.Parameter(torch.tensor(0.1))
+        # self.w2w_gate = nn.Parameter(torch.tensor(0.1))  <-- 删除或注释掉这一行
+
+        # [新增] 非线性融合层
+        # 将 Raw 和 W2W 特征拼接后，通过 MLP 进行深度融合
+        self.fusion_layer = nn.Sequential(
+            nn.Linear(args.hidden_dim * 2, args.hidden_dim),
+            nn.LayerNorm(args.hidden_dim),
+            nn.ReLU(),
+            nn.Dropout(0.1),
+            nn.Linear(args.hidden_dim, args.hidden_dim)
+        )
+        # 保留一个 Gate 来控制融合特征对原始特征的残差贡献
+        self.fusion_gate = nn.Parameter(torch.tensor(0.0))
 
         bam_layer = TransformerDecoderLayer(args.hidden_dim, args.nheads)
         boundary_layer = BoundaryDecoderLayer(args.hidden_dim, nhead=args.nheads)
@@ -160,7 +172,7 @@ class MESM_W2W_BAM(nn.Module):
         self.query_embed = nn.Embedding(args.num_queries, 3)      
         self.class_embed = nn.Linear(args.hidden_dim, 2)
         self.span_embed = MLP(args.hidden_dim, args.hidden_dim, 2, 3)
-        self.quality_proj = MLP(args.hidden_dim, args.hidden_dim, 1, 3)
+        self.quality_proj = MLP(args.hidden_dim, args.hidden_dim * 2, 1, 3)
         self.saliency_proj = nn.Linear(args.hidden_dim, 1)
 
         self.vid_con_proj = nn.Sequential(
@@ -288,7 +300,16 @@ class MESM_W2W_BAM(nn.Module):
         f_w2w = self.w2w_context(
             x=f_aligned, txt_feat=src_txt, video_mask=video_mask, txt_mask=words_mask
         )
-        f_context = f_raw + self.w2w_gate * f_w2w
+        
+        # [修改] 使用融合层
+        # f_context = f_raw + self.w2w_gate * f_w2w <-- 替换这一行
+        
+        f_concat = torch.cat([f_raw, f_w2w], dim=-1) # [B, L, 2D]
+        f_fused = self.fusion_layer(f_concat)        # [B, L, D]
+        
+        # 采用残差结构：原始特征 + 门控融合特征
+        # 这样既保留了 f_raw 的定位敏感性，又注入了 f_w2w 的上下文信息
+        f_context = f_raw + torch.sigmoid(self.fusion_gate) * f_fused
         
         # ------------------------------------------------------------------
         # 2. Anchor 生成 (使用清洗过的参数)
