@@ -105,7 +105,6 @@ class MultiContextPerception(nn.Module):
         out2 = self.linear2(self.dropout(self.activation(self.linear1(out))))
         return self.fusion_norm(out + self.dropout(out2))
 
-
 class MESM_W2W_BAM(nn.Module):
     def __init__(self, args, text_encoder=None):
         super().__init__()
@@ -144,10 +143,8 @@ class MESM_W2W_BAM(nn.Module):
 
         dataset_name = getattr(args, 'dataset_name', 'charades')
         self.w2w_context = MultiContextPerception(args.hidden_dim, args.nheads, dataset_name=dataset_name)
-        # self.w2w_gate = nn.Parameter(torch.tensor(0.1))  <-- 删除或注释掉这一行
-
-        # [新增] 非线性融合层
-        # 将 Raw 和 W2W 特征拼接后，通过 MLP 进行深度融合
+        
+        # 文本自适应门控融合
         self.fusion_layer = nn.Sequential(
             nn.Linear(args.hidden_dim * 2, args.hidden_dim),
             nn.LayerNorm(args.hidden_dim),
@@ -155,8 +152,12 @@ class MESM_W2W_BAM(nn.Module):
             nn.Dropout(0.1),
             nn.Linear(args.hidden_dim, args.hidden_dim)
         )
-        # 保留一个 Gate 来控制融合特征对原始特征的残差贡献
-        self.fusion_gate = nn.Parameter(torch.tensor(0.0))
+        self.gate_predictor = nn.Sequential(
+            nn.Linear(args.hidden_dim, args.hidden_dim),
+            nn.ReLU(),
+            nn.Linear(args.hidden_dim, args.hidden_dim),
+            nn.Sigmoid() 
+        )
 
         bam_layer = TransformerDecoderLayer(args.hidden_dim, args.nheads)
         boundary_layer = BoundaryDecoderLayer(args.hidden_dim, nhead=args.nheads)
@@ -171,9 +172,17 @@ class MESM_W2W_BAM(nn.Module):
         )
         self.query_embed = nn.Embedding(args.num_queries, 3)      
         self.class_embed = nn.Linear(args.hidden_dim, 2)
-        self.span_embed = MLP(args.hidden_dim, args.hidden_dim, 2, 3)
+        
+        # Quality Head (2x capacity)
         self.quality_proj = MLP(args.hidden_dim, args.hidden_dim * 2, 1, 3)
-        self.saliency_proj = nn.Linear(args.hidden_dim, 1)
+        self.span_embed = MLP(args.hidden_dim, args.hidden_dim, 2, 3)
+        
+        # Saliency MLP
+        self.saliency_proj = nn.Sequential(
+            nn.Linear(args.hidden_dim, args.hidden_dim),
+            nn.ReLU(),
+            nn.Linear(args.hidden_dim, 1)
+        )
 
         self.vid_con_proj = nn.Sequential(
             nn.Linear(args.hidden_dim, args.hidden_dim),
@@ -189,10 +198,11 @@ class MESM_W2W_BAM(nn.Module):
         self.class_embed = _get_clones(self.class_embed, args.dec_layers)
         self.span_embed = _get_clones(self.span_embed, args.dec_layers)
         self.quality_proj = _get_clones(self.quality_proj, args.dec_layers)
-        
         self.transformer_decoder.bbox_embed = self.span_embed
         
-        nn.init.constant_(self.saliency_proj.bias, -2.0)
+        # Init saliency bias
+        nn.init.constant_(self.saliency_proj[-1].bias, -2.0)
+        
         prior_prob = 0.01
         bias_value = -math.log((1 - prior_prob) / prior_prob)
         for class_embed_layer in self.class_embed:
@@ -229,34 +239,19 @@ class MESM_W2W_BAM(nn.Module):
         return masked_src_txt.permute(1, 0, 2), mask_selection
 
     def forward(self, video_feat, video_mask, words_id, words_mask, is_training=False):
-        # ------------------------------------------------------------------
-        # 0. [BAM-DETR 核心] 强制约束 Anchor 参数 (In-place Constraint)
-        # ------------------------------------------------------------------
-        # 这段代码必须在最前面执行，它直接修改参数的数值，保证 Anchor 永远合法
-        
-        # 约束 1: 左距离 (dim 1) <= Anchor中心 (dim 0)
-        # 逻辑: logit(d_s) <= logit(p)  =>  d_s <= p  =>  Start = p - d_s >= 0
+        # 0. Anchor 约束
         self.query_embed.weight.data[..., 1] = torch.minimum(
             self.query_embed.weight[..., 0], 
             self.query_embed.weight[..., 1]
         )
-        
-        # 约束 2: 右距离 (dim 2) <= 1 - Anchor中心
-        # 逻辑: logit(d_e) <= logit(1-p) => d_e <= 1-p => End = p + d_e <= 1
-        # inverse_sigmoid 是为了把概率空间转换回 logit 空间进行比较
-        p_prob = self.query_embed.weight[..., 0].sigmoid()
-        # 注意：为了数值稳定，使用 clamp
-        p_prob = p_prob.clamp(min=1e-4, max=1-1e-4) 
+        p_prob = self.query_embed.weight[..., 0].sigmoid().clamp(min=1e-4, max=1-1e-4) 
         limit_right = inverse_sigmoid(1.0 - p_prob)
-        
         self.query_embed.weight.data[..., 2] = torch.minimum(
             limit_right, 
             self.query_embed.weight[..., 2]
         )
 
-        # ------------------------------------------------------------------
-        # 1. 文本和视频特征编码 (Encoder) - 保持不变
-        # ------------------------------------------------------------------
+        # 1. Encoding
         if self.text_encoder:
             txt_out = self.text_encoder(words_id)
             if isinstance(txt_out, dict):
@@ -301,52 +296,71 @@ class MESM_W2W_BAM(nn.Module):
             x=f_aligned, txt_feat=src_txt, video_mask=video_mask, txt_mask=words_mask
         )
         
-        # [修改] 使用融合层
-        # f_context = f_raw + self.w2w_gate * f_w2w <-- 替换这一行
+        # 融合
+        f_concat = torch.cat([f_raw, f_w2w], dim=-1) 
+        f_fused = self.fusion_layer(f_concat)        
         
-        f_concat = torch.cat([f_raw, f_w2w], dim=-1) # [B, L, 2D]
-        f_fused = self.fusion_layer(f_concat)        # [B, L, D]
+        txt_mask_float = words_mask.float().unsqueeze(-1)
+        global_txt = (src_txt.permute(1,0,2) * txt_mask_float).sum(dim=1) / (txt_mask_float.sum(dim=1) + 1e-6) 
         
-        # 采用残差结构：原始特征 + 门控融合特征
-        # 这样既保留了 f_raw 的定位敏感性，又注入了 f_w2w 的上下文信息
-        f_context = f_raw + torch.sigmoid(self.fusion_gate) * f_fused
+        # [Fix] unsqueeze(0) 使得 shape 为 [1, B, D]，正确广播到 [L, B, D]
+        channel_gate = self.gate_predictor(global_txt).unsqueeze(0) 
+        f_context = f_raw + channel_gate * f_fused
         
-        # ------------------------------------------------------------------
-        # 2. Anchor 生成 (使用清洗过的参数)
-        # ------------------------------------------------------------------
-        
-        # [A] Saliency Scores
-        memory = f_context.permute(1, 0, 2) # [B, L, D]
-        saliency_scores = self.saliency_proj(memory).squeeze(-1) # [B, L]
+        # 2. Anchor Generation
+        memory = f_context.permute(1, 0, 2) 
+        saliency_scores = self.saliency_proj(memory).squeeze(-1)
         if torch.isnan(saliency_scores).any() or torch.isinf(saliency_scores).any():
             saliency_scores = torch.nan_to_num(saliency_scores, nan=0.0, posinf=100.0, neginf=-100.0)
         
-        # [B] 生成 Static Anchors (非对称)
-        raw_anchor = self.query_embed.weight.unsqueeze(0).repeat(memory.shape[0], 1, 1)
-        anchor_prob = raw_anchor.sigmoid()
+        # Hybrid Anchor Selection
+        num_q = self.args.num_queries
+        num_static = num_q // 2
+        num_dynamic = num_q - num_static
         
-        p = anchor_prob[..., 0]   # Center
-        d_s = anchor_prob[..., 1] # Left Dist
-        d_e = anchor_prob[..., 2] # Right Dist
+        # Part A: Static Anchors
+        static_anchor_params = self.query_embed.weight[:num_static]
+        static_prob = static_anchor_params.sigmoid()
+        static_centers = static_prob[..., 0]
+        static_widths = static_prob[..., 1:] 
         
-        # 计算 Start / End
-        # 因为前面已经做了硬约束，这里理论上不需要再 clamp，但保留以防万一
-        start = (p - d_s).clamp(min=1e-4, max=1-1e-4)
-        end   = (p + d_e).clamp(min=1e-4, max=1-1e-4)
+        # Part B: Dynamic Anchors (Saliency Peaks)
+        saliency_probs = saliency_scores.sigmoid()
+        if video_mask is not None:
+            saliency_probs = saliency_probs * video_mask.float()
         
-        # 转回 Logit 域传给 Decoder
-        query_pos = torch.stack([
-            inverse_sigmoid(start), 
-            inverse_sigmoid(end)
-        ], dim=-1) # [B, Nq, 2]
+        padded_sal = F.pad(saliency_probs.unsqueeze(1), (1, 1), mode='constant', value=0).squeeze(1)
+        is_peak = (saliency_probs > padded_sal[:, :-2]) & (saliency_probs > padded_sal[:, 2:])
+        peak_scores = saliency_probs * is_peak.float()
         
-        # [C] Content Query 全 0
-        tgt = torch.zeros((self.args.num_queries, memory.shape[0], self.hidden_dim), 
+        topk_scores, topk_indices = torch.topk(peak_scores, num_dynamic, dim=1) 
+        
+        L_feat = memory.shape[1]
+        dynamic_centers = (topk_indices.float() + 0.5) / L_feat 
+        dynamic_centers = dynamic_centers.clamp(min=0.01, max=0.99)
+        
+        dynamic_widths = self.query_embed.weight[num_static:].sigmoid()[..., 1:] 
+        dynamic_widths = dynamic_widths.unsqueeze(0).expand(memory.shape[0], -1, -1)
+        
+        # Concat
+        static_centers = static_centers.unsqueeze(0).expand(memory.shape[0], -1) 
+        static_widths = static_widths.unsqueeze(0).expand(memory.shape[0], -1, -1)
+        
+        all_centers = torch.cat([static_centers, dynamic_centers], dim=1)  
+        all_widths = torch.cat([static_widths, dynamic_widths], dim=1)     
+        
+        d_s = all_widths[..., 0]
+        d_e = all_widths[..., 1]
+        
+        start = (all_centers - d_s).clamp(min=1e-4, max=1-1e-4)
+        end   = (all_centers + d_e).clamp(min=1e-4, max=1-1e-4)
+        
+        query_pos = torch.stack([inverse_sigmoid(start), inverse_sigmoid(end)], dim=-1) 
+        
+        # 3. Decoder
+        tgt = torch.zeros((num_q, memory.shape[0], self.hidden_dim), 
                           device=memory.device, dtype=memory.dtype)
 
-        # ------------------------------------------------------------------
-        # 3. Transformer Decoder
-        # ------------------------------------------------------------------
         hs, refs, boundary_mem = self.transformer_decoder(
             tgt, f_context, memory_key_padding_mask=~video_mask, 
             pos=pos_v, refpoints_unsigmoid=query_pos
@@ -356,23 +370,13 @@ class MESM_W2W_BAM(nn.Module):
         outputs_quality = torch.stack([self.quality_proj[i](hs[i]) for i in range(len(hs))])
         outputs_coord = refs 
 
-        # ------------------------------------------------------------------
-        # 4. 对比学习特征准备
-        # ------------------------------------------------------------------
-        txt_feat_perm = src_txt.permute(1, 0, 2)
-        txt_mask_float = words_mask.float().unsqueeze(-1)
-        sent_feat = (txt_feat_perm * txt_mask_float).sum(dim=1) / (txt_mask_float.sum(dim=1) + 1e-6)
-        proj_txt_emb = self.txt_con_proj(sent_feat) 
-        
+        # 4. Contrastive & Output
+        proj_txt_emb = self.txt_con_proj(global_txt) 
         vid_query_feat = hs[-1].permute(1, 0, 2)
         proj_vid_emb = self.vid_con_proj(vid_query_feat) 
-
         proj_txt_emb = F.normalize(proj_txt_emb, p=2, dim=-1)
         proj_vid_emb = F.normalize(proj_vid_emb, p=2, dim=-1)
 
-        # ------------------------------------------------------------------
-        # 5. 输出组装
-        # ------------------------------------------------------------------
         out = {
             'pred_logits': outputs_class[-1].permute(1, 0, 2), 
             'pred_spans': outputs_coord[-1], 
@@ -396,6 +400,8 @@ class MESM_W2W_BAM(nn.Module):
             ]
             
         return out
+
+    
 def build_model(args):
     if not hasattr(args, 'vocab_size'): args.vocab_size = 49408
     if not hasattr(args, 'rec_fw'): args.rec_fw = True

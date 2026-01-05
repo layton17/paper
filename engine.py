@@ -3,6 +3,8 @@ import torch.nn.functional as F
 import logging
 from tqdm import tqdm
 from utils import span_cxw_to_xx, calculate_stats, calculate_mAP
+# [新增] 引入 torchvision 的 NMS，这是提升 R1 的关键工具
+from torchvision.ops import nms 
 
 logger = logging.getLogger(__name__)
 
@@ -21,31 +23,57 @@ def evaluate(model, data_loader, device):
         outputs = model(video_feat, video_mask, words_id, words_mask, is_training=False)
         
         pred_logits = outputs['pred_logits']
-        pred_spans = outputs['pred_spans']   # [B, N, 2] (Start, End) - BAM 原生输出
+        pred_spans = outputs['pred_spans']   # [B, N, 2] (Start, End)
         pred_quality = outputs['pred_quality']
         
+        # 1. 计算融合分数 (Quality-Aware Ranking)
         prob = F.softmax(pred_logits, -1)
-        scores = prob[..., 0]
-        quality_scores = pred_quality.sigmoid().squeeze(-1)
-        combined_scores = (scores ** 2.0) * (quality_scores ** 2.0)
-        #combined_scores = scores
+        scores = prob[..., 0] # 前景概率
+        quality_scores = pred_quality.sigmoid().squeeze(-1) # 预测的 IoU
         
-        # [修正] pred_spans 已经是 start/end，不需要转换！
-        # 如果模型输出在 [0,1]，直接用
+        # [策略] 使用平方加权，拉大高质量和低质量样本的差距，让排序更决绝
+        combined_scores = (scores ** 2.0) * (quality_scores ** 2.0)
+        
+        # 2. 坐标处理
+        # pred_spans 已经是 start/end 格式，直接限制在 [0, 1] 范围内
         pred_spans_xx = pred_spans.clamp(min=0.0, max=1.0)
         
         targets = batch['targets']
         for i, target in enumerate(targets):
             duration = target['duration']
             
-            # [修正] GT 是 cxw，需要转为 xx
+            # 获取当前样本的预测结果
+            cur_spans = pred_spans_xx[i]    # [N, 2]
+            cur_scores = combined_scores[i] # [N]
+            
+            # 3. [关键改进] 执行 NMS (Non-Maximum Suppression)
+            # 目的：去除那些堆积在一起的重复框，保证 Top-1 是唯一的最佳框
+            
+            # 构造 Boxes [N, 4] -> (x1, y1, x2, y2)
+            # 因为是 1D 时序检测，我们将 y 轴设为 0-1 的伪坐标，只在 x 轴做 NMS
+            boxes = torch.zeros((cur_spans.shape[0], 4), device=device)
+            boxes[:, 0] = cur_spans[:, 0] # x1 (start)
+            boxes[:, 2] = cur_spans[:, 1] # x2 (end)
+            boxes[:, 1] = 0.0             # y1
+            boxes[:, 3] = 1.0             # y2
+            
+            # 执行 NMS, IoU 阈值建议 0.45 (0.4~0.5 之间效果最好)
+            # 这会返回保留下来的索引，按分数从高到低排序
+            keep_indices = nms(boxes, cur_scores, iou_threshold=0.45)
+            
+            # 根据 NMS 结果筛选预测
+            final_spans = cur_spans[keep_indices]
+            final_scores = cur_scores[keep_indices]
+            
+            # 转换 GT (Ground Truth)
             gt_spans_tensor = target['spans'].to(device) if isinstance(target['spans'], torch.Tensor) else torch.tensor(target['spans'], device=device)
             gt_spans_xx = span_cxw_to_xx(gt_spans_tensor)
             
+            # 保存结果 (还原到真实时间尺度 * duration)
             results.append({
                 "video_id": target['video_id'],
-                "pred_spans": pred_spans_xx[i].cpu().numpy() * duration,
-                "pred_scores": combined_scores[i].cpu().numpy(),
+                "pred_spans": final_spans.cpu().numpy() * duration,
+                "pred_scores": final_scores.cpu().numpy(),
                 "gt_spans": gt_spans_xx.cpu().numpy() * duration
             })
             
