@@ -314,8 +314,9 @@ class MESM_W2W_BAM(nn.Module):
             saliency_scores = torch.nan_to_num(saliency_scores, nan=0.0, posinf=100.0, neginf=-100.0)
         
         # Hybrid Anchor Selection
+        # 将 Dynamic (Saliency-Guided) 比例提升到 80%，Static 降为 20%
         num_q = self.args.num_queries
-        num_static = num_q // 2
+        num_static = int(num_q * 0.2)  
         num_dynamic = num_q - num_static
         
         # Part A: Static Anchors

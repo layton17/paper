@@ -258,13 +258,24 @@ def main(args):
                                cost_span=5, 
                                cost_giou=2)
     
-    weight_dict = {'loss_labels': 2.0, # 默认为 1.0
-                   'loss_span': 5.0, # 默认为 10.0
-                   'loss_giou': 2.0, # 默认为 4.0
-                   'loss_quality': 2.0, # 
-                   'loss_recfw': 0.15,   # 
-                   'loss_contrastive': 0.5, #  对比损失权重，默认为 1.0
-                   'loss_saliency': 0.1} # 0.2
+    weight_dict = {
+        'loss_labels': 2.0, 
+        'loss_span': 5.0, 
+        'loss_giou': 2.0, 
+        'loss_quality': 2.0, 
+
+        # 1. 大幅提升 Saliency 权重 (0.1 -> 4.0)
+        # 目标: 让 0.16 * 4.0 ≈ 0.64，使其成为一个主要优化目标
+        'loss_saliency': 4.0, 
+
+        # 2. 适当降低 Contrastive 权重 (0.5 -> 0.2)
+        # 原因: 目前 3.55 * 0.5 = 1.77 过于主导，可能干扰定位任务
+        'loss_contrastive': 0.2, 
+
+        # 3. 适当降低 Reconstruction 权重 (0.15 -> 0.1)
+        # 原因: 9.55 * 0.15 = 1.43 依然偏高
+        'loss_recfw': 0.1 
+    }
 
     if args.aux_loss:
         aux_weight_dict = {}

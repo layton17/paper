@@ -129,6 +129,11 @@ class SetCriterion(nn.Module):
         if 'saliency_scores' not in outputs: return {}
         saliency_scores = outputs['saliency_scores']
         
+        # [新增] 获取视频掩码，计算有效的总帧数
+        # Saliency 是逐帧预测，必须除以总帧数，否则 Loss 会比其他项大两个数量级
+        video_mask = outputs['video_mask']
+        num_valid_frames = video_mask.sum().clamp(min=1.0)
+        
         gt_saliency = torch.zeros_like(saliency_scores)
         L = saliency_scores.shape[1]
         
@@ -136,24 +141,19 @@ class SetCriterion(nn.Module):
             spans = t['spans']
             if len(spans) == 0: continue
             
-            # 这里的 spans 已经被 forward 清洗过，应该是 <= 1.0 的
-            # 转换为特征图坐标
             starts = (spans[:, 0] - spans[:, 1] / 2) * L
             ends = (spans[:, 0] + spans[:, 1] / 2) * L
             
             for s, e in zip(starts, ends):
-                # [侦探检查] Saliency 索引
                 s_idx = int(math.floor(s.item()))
                 e_idx = int(math.ceil(e.item()))
-                
-                # 显式截断
                 s_idx = max(0, min(L, s_idx))
                 e_idx = max(0, min(L, e_idx))
-                
                 if e_idx > s_idx:
                     gt_saliency[i, s_idx:e_idx] = 1.0
         
-        loss = sigmoid_focal_loss(saliency_scores, gt_saliency, num_spans)
+        # [修改] 使用 num_valid_frames 进行归一化
+        loss = sigmoid_focal_loss(saliency_scores, gt_saliency, num_valid_frames)
         return {'loss_saliency': loss}
 
     def loss_quality(self, outputs, targets, indices, num_spans):
