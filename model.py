@@ -173,7 +173,7 @@ class MESM_W2W_BAM(nn.Module):
         self.query_embed = nn.Embedding(args.num_queries, 3)      
         self.class_embed = nn.Linear(args.hidden_dim, 2)
         
-        # Quality Head (2x capacity)
+        # Quality Head
         self.quality_proj = MLP(args.hidden_dim, args.hidden_dim * 2, 1, 3)
         self.span_embed = MLP(args.hidden_dim, args.hidden_dim, 2, 3)
         
@@ -200,7 +200,6 @@ class MESM_W2W_BAM(nn.Module):
         self.quality_proj = _get_clones(self.quality_proj, args.dec_layers)
         self.transformer_decoder.bbox_embed = self.span_embed
         
-        # Init saliency bias
         nn.init.constant_(self.saliency_proj[-1].bias, -2.0)
         
         prior_prob = 0.01
@@ -217,6 +216,13 @@ class MESM_W2W_BAM(nn.Module):
         for q_proj in self.quality_proj:
             nn.init.constant_(q_proj.layers[-1].weight.data, 0)
             nn.init.constant_(q_proj.layers[-1].bias.data, 0)
+
+        # [新增] 预定义高斯核用于平滑 (Sigma=1.0)
+        sigma = 1.0
+        kernel_size = 5
+        x = torch.arange(kernel_size).float() - kernel_size // 2
+        kernel = torch.exp(-x**2 / (2*sigma**2))
+        self.gaussian_kernel = kernel / kernel.sum()
 
     def _mask_words(self, src_txt, src_txt_mask, masked_token):
         src_txt_t = src_txt.permute(1, 0, 2).clone() 
@@ -303,7 +309,6 @@ class MESM_W2W_BAM(nn.Module):
         txt_mask_float = words_mask.float().unsqueeze(-1)
         global_txt = (src_txt.permute(1,0,2) * txt_mask_float).sum(dim=1) / (txt_mask_float.sum(dim=1) + 1e-6) 
         
-        # [Fix] unsqueeze(0) 使得 shape 为 [1, B, D]，正确广播到 [L, B, D]
         channel_gate = self.gate_predictor(global_txt).unsqueeze(0) 
         f_context = f_raw + channel_gate * f_fused
         
@@ -313,10 +318,9 @@ class MESM_W2W_BAM(nn.Module):
         if torch.isnan(saliency_scores).any() or torch.isinf(saliency_scores).any():
             saliency_scores = torch.nan_to_num(saliency_scores, nan=0.0, posinf=100.0, neginf=-100.0)
         
-        # Hybrid Anchor Selection
-        # 将 Dynamic (Saliency-Guided) 比例提升到 80%，Static 降为 20%
+        # --- [修正] Anchor 比例回调至 50/50 ---
         num_q = self.args.num_queries
-        num_static = int(num_q * 0.2)  
+        num_static = num_q // 2  # 回归 50%
         num_dynamic = num_q - num_static
         
         # Part A: Static Anchors
@@ -325,14 +329,36 @@ class MESM_W2W_BAM(nn.Module):
         static_centers = static_prob[..., 0]
         static_widths = static_prob[..., 1:] 
         
-        # Part B: Dynamic Anchors (Saliency Peaks)
+        # Part B: Dynamic Anchors with Gaussian Smoothing
         saliency_probs = saliency_scores.sigmoid()
         if video_mask is not None:
             saliency_probs = saliency_probs * video_mask.float()
         
-        padded_sal = F.pad(saliency_probs.unsqueeze(1), (1, 1), mode='constant', value=0).squeeze(1)
-        is_peak = (saliency_probs > padded_sal[:, :-2]) & (saliency_probs > padded_sal[:, 2:])
-        peak_scores = saliency_probs * is_peak.float()
+        # [新增] 高斯平滑 (减少噪声峰值)
+        # Pad -> Conv1d -> Remove Pad
+        B, L = saliency_probs.shape
+        k_size = len(self.gaussian_kernel)
+        pad = k_size // 2
+        
+        # 确保 kernel 在正确设备上
+        if self.gaussian_kernel.device != saliency_probs.device:
+            self.gaussian_kernel = self.gaussian_kernel.to(saliency_probs.device)
+            
+        sal_reshaped = saliency_probs.unsqueeze(1) # [B, 1, L]
+        # 使用 replicate padding 避免边界效应
+        sal_padded = F.pad(sal_reshaped, (pad, pad), mode='replicate')
+        kernel_reshaped = self.gaussian_kernel.view(1, 1, -1)
+        
+        smooth_sal = F.conv1d(sal_padded, kernel_reshaped).squeeze(1) # [B, L]
+        
+        # 结合原始分数和平滑分数 (平滑定大局，原始定细节)
+        # 0.7 * Smooth + 0.3 * Raw
+        refined_sal = 0.7 * smooth_sal + 0.3 * saliency_probs
+        
+        # 找峰值
+        padded_sal = F.pad(refined_sal.unsqueeze(1), (1, 1), mode='constant', value=0).squeeze(1)
+        is_peak = (refined_sal > padded_sal[:, :-2]) & (refined_sal > padded_sal[:, 2:])
+        peak_scores = refined_sal * is_peak.float()
         
         topk_scores, topk_indices = torch.topk(peak_scores, num_dynamic, dim=1) 
         

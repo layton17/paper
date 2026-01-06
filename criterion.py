@@ -129,31 +129,51 @@ class SetCriterion(nn.Module):
         if 'saliency_scores' not in outputs: return {}
         saliency_scores = outputs['saliency_scores']
         
-        # [新增] 获取视频掩码，计算有效的总帧数
-        # Saliency 是逐帧预测，必须除以总帧数，否则 Loss 会比其他项大两个数量级
+        # Video mask for normalization
         video_mask = outputs['video_mask']
         num_valid_frames = video_mask.sum().clamp(min=1.0)
         
+        # [CHANGE] Use Gaussian Soft Targets instead of Binary 0/1
         gt_saliency = torch.zeros_like(saliency_scores)
         L = saliency_scores.shape[1]
         
+        # Create a coordinate grid [0, 1, 2, ..., L-1]
+        grid = torch.arange(L, device=saliency_scores.device).float().unsqueeze(0) # [1, L]
+        
         for i, t in enumerate(targets):
-            spans = t['spans']
+            spans = t['spans'] # [N, 2] (center, width) relative to [0,1]
             if len(spans) == 0: continue
             
-            starts = (spans[:, 0] - spans[:, 1] / 2) * L
-            ends = (spans[:, 0] + spans[:, 1] / 2) * L
+            # Convert to absolute coordinates
+            centers = spans[:, 0] * L
+            widths = spans[:, 1] * L
             
-            for s, e in zip(starts, ends):
-                s_idx = int(math.floor(s.item()))
-                e_idx = int(math.ceil(e.item()))
-                s_idx = max(0, min(L, s_idx))
-                e_idx = max(0, min(L, e_idx))
-                if e_idx > s_idx:
-                    gt_saliency[i, s_idx:e_idx] = 1.0
+            for c, w in zip(centers, widths):
+                # Gaussian distribution: exp(- (x - c)^2 / (2 * sigma^2))
+                # Let sigma be proportional to width (e.g., sigma = width / 6 covers 3-sigma)
+                sigma = w / 6.0
+                sigma = sigma.clamp(min=0.5) # Minimum sigma to avoid spikes
+                
+                gaussian = torch.exp(- (grid - c)**2 / (2 * sigma**2))
+                
+                # Take the max over multiple spans (if overlapping)
+                gt_saliency[i] = torch.max(gt_saliency[i], gaussian.squeeze(0))
         
-        # [修改] 使用 num_valid_frames 进行归一化
-        loss = sigmoid_focal_loss(saliency_scores, gt_saliency, num_valid_frames)
+        # Use Binary Cross Entropy or MSE for soft targets
+        # Focal Loss logic needs adjustment for soft targets, so let's stick to a robust Soft-BCE
+        
+        # Mask out padding
+        if video_mask is not None:
+            saliency_scores = saliency_scores * video_mask.float()
+            gt_saliency = gt_saliency * video_mask.float()
+
+        # Simple MSE or BCE with Logits
+        # Using BCEWithLogits is generally stable for soft targets [0,1]
+        loss = F.binary_cross_entropy_with_logits(saliency_scores, gt_saliency, reduction='none')
+        
+        # Normalize by valid frames
+        loss = loss.sum() / num_valid_frames
+        
         return {'loss_saliency': loss}
 
     def loss_quality(self, outputs, targets, indices, num_spans):

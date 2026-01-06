@@ -259,7 +259,7 @@ def main(args):
                                cost_giou=2)
     
     weight_dict = {
-        'loss_labels': 2.0, 
+        'loss_labels': 5.0, 
         'loss_span': 5.0, 
         'loss_giou': 2.0, 
         'loss_quality': 2.0, 
