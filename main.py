@@ -258,22 +258,26 @@ def main(args):
                                cost_span=5, 
                                cost_giou=2)
     
+    # [修改 A] 重构 Loss 权重配置
     weight_dict = {
-        'loss_labels': 5.0, 
+        # Labels: 分类任务通常收敛很快，权重从 5.0 降为 2.0，防止过拟合
+        'loss_labels': 2.0, 
+        
+        # Span & GIoU: 核心回归任务，保持高权重，主导梯度
         'loss_span': 5.0, 
         'loss_giou': 2.0, 
+        
+        # Quality: 保持不变，用于辅助排序
         'loss_quality': 2.0, 
 
-        # 1. 大幅提升 Saliency 权重 (0.1 -> 4.0)
-        # 目标: 让 0.16 * 4.0 ≈ 0.64，使其成为一个主要优化目标
-        'loss_saliency': 4.0, 
+        # [关键修改] Saliency: 从 4.0 降至 0.4
+        # 理由: Raw Loss 约为 1.1，乘以 0.4 后为 0.44，既能提供辅助信息，又不会掩盖回归任务的梯度
+        'loss_saliency': 0.4, 
 
-        # 2. 适当降低 Contrastive 权重 (0.5 -> 0.2)
-        # 原因: 目前 3.55 * 0.5 = 1.77 过于主导，可能干扰定位任务
+        # Contrastive: 保持较低权重
         'loss_contrastive': 0.2, 
 
-        # 3. 适当降低 Reconstruction 权重 (0.15 -> 0.1)
-        # 原因: 9.55 * 0.15 = 1.43 依然偏高
+        # RecFW: 如果不是核心任务，建议进一步降低或保持 0.1
         'loss_recfw': 0.1 
     }
 
@@ -293,19 +297,32 @@ def main(args):
     # -----------------------------------------------------------
     # 6. 优化器
     # -----------------------------------------------------------
-    # 将 quality_proj 和 masked_token 等新参数加入优化器
     param_dicts = [
         {"params": [p for n, p in model.named_parameters() if "text_encoder" not in n and p.requires_grad], "lr": args.lr},
     ]
     optimizer = torch.optim.AdamW(param_dicts, lr=args.lr, weight_decay=args.weight_decay)
 
+    # [修改 C] 使用 CosineAnnealingLR 替换 MultiStepLR
+    # Cosine 调度器在微调后期能更平滑地降低学习率，有助于模型在局部极小值附近稳定下来
+    lr_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+        optimizer,
+        T_max=args.epochs,      # 设为总 Epoch 数
+        eta_min=args.lr * 0.01  # 最小学习率设为初始 LR 的 1%
+    )
+    
+    # 将 quality_proj 和 masked_token 等新参数加入优化器
+    #param_dicts = [
+    #    {"params": [p for n, p in model.named_parameters() if "text_encoder" not in n and p.requires_grad], "lr": args.lr},
+    #]
+    #optimizer = torch.optim.AdamW(param_dicts, lr=args.lr, weight_decay=args.weight_decay)
+
     # 将 StepLR 替换为 MultiStepLR
     # main.py
-    lr_scheduler = torch.optim.lr_scheduler.MultiStepLR(
-        optimizer,
-        milestones=[60, 80],  
-        gamma=0.5             
-    )
+    #lr_scheduler = torch.optim.lr_scheduler.MultiStepLR(
+    #    optimizer,
+    #    milestones=[60, 80],  
+    #    gamma=0.5             
+    #)
     #lr_scheduler = torch.optim.lr_scheduler.StepLR(
     #    optimizer,
     #    step_size=args.lr_drop, # 30

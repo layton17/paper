@@ -31,7 +31,7 @@ def get_args_parser():
 
     # 训练参数
     parser.add_argument('--lr', default=1e-4, type=float)
-    parser.add_argument('--batch_size', default=32, type=int)
+    parser.add_argument('--batch_size', default=64, type=int)
     parser.add_argument('--epochs', default=50, type=int)
     parser.add_argument('--weight_decay', default=1e-4, type=float)
     parser.add_argument('--lr_drop', default=30, type=int)

@@ -149,14 +149,14 @@ class SetCriterion(nn.Module):
             widths = spans[:, 1] * L
             
             for c, w in zip(centers, widths):
-                # Gaussian distribution: exp(- (x - c)^2 / (2 * sigma^2))
-                # Let sigma be proportional to width (e.g., sigma = width / 6 covers 3-sigma)
+                # [修改 B] 调整 Sigma 计算逻辑
+                # 原逻辑: sigma = w / 6.0, clamp(min=0.5)
+                # 新逻辑: 增大最小 Sigma，使 Target 更平滑，更容易学习
+                # 即使是很短的片段，也给它至少 1.5 的 Sigma 宽度，避免产生极其尖锐的“钉子”
                 sigma = w / 6.0
-                sigma = sigma.clamp(min=0.5) # Minimum sigma to avoid spikes
+                sigma = sigma.clamp(min=1.5) 
                 
                 gaussian = torch.exp(- (grid - c)**2 / (2 * sigma**2))
-                
-                # Take the max over multiple spans (if overlapping)
                 gt_saliency[i] = torch.max(gt_saliency[i], gaussian.squeeze(0))
         
         # Use Binary Cross Entropy or MSE for soft targets
