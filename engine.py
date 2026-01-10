@@ -31,8 +31,8 @@ def evaluate(model, data_loader, device):
         scores = prob[..., 0] # 前景概率
         quality_scores = pred_quality.sigmoid().squeeze(-1) # 预测的 IoU
         
-        # [策略] 使用平方加权，拉大高质量和低质量样本的差距，让排序更决绝
-        combined_scores = (scores ** 2.0) * (quality_scores ** 2.0)
+        
+        combined_scores = scores * (quality_scores ** 4.0)
         
         # 2. 坐标处理
         # pred_spans 已经是 start/end 格式，直接限制在 [0, 1] 范围内
@@ -59,7 +59,7 @@ def evaluate(model, data_loader, device):
             
             # 执行 NMS, IoU 阈值建议 0.45 (0.4~0.5 之间效果最好)
             # 这会返回保留下来的索引，按分数从高到低排序
-            keep_indices = nms(boxes, cur_scores, iou_threshold=0.45)
+            keep_indices = nms(boxes, cur_scores, iou_threshold=0.35)
             
             # 根据 NMS 结果筛选预测
             final_spans = cur_spans[keep_indices]

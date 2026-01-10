@@ -179,10 +179,15 @@ class MESM_W2W_BAM(nn.Module):
         
         # Saliency MLP
         self.saliency_proj = nn.Sequential(
-            nn.Linear(args.hidden_dim, args.hidden_dim),
-            nn.ReLU(),
-            nn.Linear(args.hidden_dim, 1)
-        )
+        # 1. 增加时序卷积，感知前后文 (Kernel=3, Padding=1)
+        nn.Conv1d(args.hidden_dim, args.hidden_dim, kernel_size=3, padding=1),
+        nn.GroupNorm(32, args.hidden_dim), # 归一化
+        nn.ReLU(),
+        # 2. 再接 MLP 预测分数
+        nn.Conv1d(args.hidden_dim, args.hidden_dim, kernel_size=1),
+        nn.ReLU(),
+        nn.Conv1d(args.hidden_dim, 1, kernel_size=1)
+)
 
         self.vid_con_proj = nn.Sequential(
             nn.Linear(args.hidden_dim, args.hidden_dim),
@@ -314,7 +319,8 @@ class MESM_W2W_BAM(nn.Module):
         
         # 2. Anchor Generation
         memory = f_context.permute(1, 0, 2) 
-        saliency_scores = self.saliency_proj(memory).squeeze(-1)
+        saliency_in = memory.permute(0, 2, 1) 
+        saliency_scores = self.saliency_proj(saliency_in).squeeze(1) # 输出 [Batch, Length]
         if torch.isnan(saliency_scores).any() or torch.isinf(saliency_scores).any():
             saliency_scores = torch.nan_to_num(saliency_scores, nan=0.0, posinf=100.0, neginf=-100.0)
         

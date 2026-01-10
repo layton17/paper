@@ -33,7 +33,7 @@ def get_args_parser():
     parser.add_argument('--lr', default=1e-4, type=float)
     parser.add_argument('--batch_size', default=64, type=int)
     parser.add_argument('--epochs', default=50, type=int)
-    parser.add_argument('--weight_decay', default=1e-4, type=float)
+    parser.add_argument('--weight_decay', default=1e-3, type=float)
     parser.add_argument('--lr_drop', default=30, type=int)
     parser.add_argument('--clip_max_norm', default=0.1, type=float)
 
@@ -52,5 +52,9 @@ def get_args_parser():
     parser.add_argument('--recfw_loss_coef', default=0.1, type=float, help="MESM 重构损失权重")
     
     parser.add_argument('--quality_loss_coef', default=1.0, type=float, help="IoU 质量预测损失权重 (BAM-DETR 核心)")
+    
+    # [新增] Resume 相关参数
+    parser.add_argument('--resume', default='', help='resume from checkpoint')
+    parser.add_argument('--start_epoch', default=0, type=int, metavar='N', help='start epoch')
 
     return parser

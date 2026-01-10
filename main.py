@@ -328,6 +328,44 @@ def main(args):
     #    step_size=args.lr_drop, # 30
     #    gamma=0.1
     #)
+    
+    # ===========================================================
+    # [新增] Resume / Fine-tuning 逻辑
+    # ===========================================================
+    if args.resume:
+        if args.resume.startswith('https'):
+            checkpoint = torch.hub.load_state_dict_from_url(args.resume, map_location='cpu', check_hash=True)
+        else:
+            logger.info(f"Loading checkpoint from {args.resume}")
+            checkpoint = torch.load(args.resume, map_location='cpu') # 先加载到 CPU
+
+        # 1. 加载模型权重
+        model_dict = model.state_dict()
+        pretrained_dict = checkpoint['model_state_dict']
+        
+        # 过滤掉不匹配的键 (以防万一你修改了模型结构)
+        pretrained_dict = {k: v for k, v in pretrained_dict.items() if k in model_dict and v.shape == model_dict[k].shape}
+        
+        # 更新权重
+        model_dict.update(pretrained_dict)
+        model.load_state_dict(model_dict)
+        
+        logger.info(f"✅ Loaded {len(pretrained_dict)}/{len(model_dict)} parameters from checkpoint.")
+
+        # 2. [关键] 关于 Optimizer 和 Epoch 的处理
+        # 情况 A: 如果是【断点续训】(比如训练了一半崩了)，你需要恢复 optimizer 和 start_epoch
+        # 情况 B: 如果是【Fine-tuning / 第二阶段】(如你现在的情况)，我们通常只加载模型权重，
+        #         使用新的 LR 和新的 Scheduler 从头开始优化，所以不要加载 optimizer。
+        
+        # 这里我写了一个自动判断：如果命令行指定的 start_epoch > 0，则认为是断点续训，加载优化器状态
+        if args.start_epoch > 0 and 'optimizer_state_dict' in checkpoint and 'epoch' in checkpoint:
+             logger.info(f"Resuming optimizer and scheduler states from epoch {checkpoint['epoch']}...")
+             optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+             # 如果 scheduler 也在 checkpoint 里，也可以加载
+             # lr_scheduler.load_state_dict(checkpoint['scheduler_state_dict']) 
+             args.start_epoch = checkpoint['epoch'] + 1
+        else:
+             logger.info("🚀 Starting Fine-tuning: Resetting Optimizer and Epoch count.")
     # -----------------------------------------------------------
     # 7. 训练循环
     # -----------------------------------------------------------
