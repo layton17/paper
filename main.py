@@ -34,14 +34,16 @@ def train_one_epoch(model, criterion, data_loader, optimizer, device, epoch):
     criterion.train()
     
     total_loss = 0
-    # [统计变量初始化]
+    
+    # [统计变量初始化] - 确保初始化所有 8 个 Loss
     total_span_loss = 0
     total_giou_loss = 0
-    total_quality_loss = 0
+    total_label_loss = 0      # 原有：分类 Loss
+    total_quality_loss = 0    # 原有：质量预测 Loss
+    total_cont_loss = 0       # 原有：文本视频对比 Loss
     total_saliency_loss = 0
-    total_cont_loss = 0
     total_recfw_loss = 0   
-    total_label_loss = 0   
+    total_isp_loss = 0        # [新增]：ISP Loss
     
     pbar = tqdm(enumerate(data_loader), total=len(data_loader), desc=f"Epoch {epoch} Train")
     
@@ -49,8 +51,8 @@ def train_one_epoch(model, criterion, data_loader, optimizer, device, epoch):
         video_feat = batch['video_feat'].to(device)
         video_mask = batch['video_mask'].to(device)
         words_id = batch['words_id'].to(device)
-        txt_ids = batch['txt_ids'].to(device)
         words_mask = batch['words_mask'].to(device)
+        # 兼容不同格式的 targets
         targets = [{k: v.to(device) if isinstance(v, torch.Tensor) else v for k, v in t.items()} for t in batch['targets']]
 
         # Forward
@@ -72,51 +74,55 @@ def train_one_epoch(model, criterion, data_loader, optimizer, device, epoch):
         
         total_loss += losses.item()
         
-        # 提取各个子 Loss
+        # [提取所有 Loss] - 如果字典里没有，默认返回 0
         l_span = loss_dict.get('loss_span', torch.tensor(0.0)).item()
         l_giou = loss_dict.get('loss_giou', torch.tensor(0.0)).item()
-        l_qual = loss_dict.get('loss_quality', torch.tensor(0.0)).item()
-        l_cont = loss_dict.get('loss_contrastive', torch.tensor(0.0)).item()
+        l_label = loss_dict.get('loss_labels', torch.tensor(0.0)).item()       # 恢复
+        l_qual = loss_dict.get('loss_quality', torch.tensor(0.0)).item()       # 恢复
+        l_cont = loss_dict.get('loss_contrastive', torch.tensor(0.0)).item()   # 恢复
         l_sal = loss_dict.get('loss_saliency', torch.tensor(0.0)).item()
         l_rec = loss_dict.get('loss_recfw', torch.tensor(0.0)).item()    
-        l_label = loss_dict.get('loss_labels', torch.tensor(0.0)).item() 
+        l_isp = loss_dict.get('loss_isp', torch.tensor(0.0)).item()            # 新增
         
-        # 累加统计
+        # [累加统计]
         total_span_loss += l_span
         total_giou_loss += l_giou
+        total_label_loss += l_label
         total_quality_loss += l_qual
         total_cont_loss += l_cont
         total_saliency_loss += l_sal
         total_recfw_loss += l_rec    
-        total_label_loss += l_label  
+        total_isp_loss += l_isp
         
-        # 实时更新进度条
+        # [实时进度条] - 显示最重要的几个 (避免太长显示不下)
         pbar.set_postfix({
-            'L': f"{losses.item():.2f}",     
-            'Span': f"{l_span:.3f}",         
-            'GIoU': f"{l_giou:.3f}",
-            'Sal': f"{l_sal:.2f}",           
-            'Rec': f"{l_rec:.3f}"            
+            'Loss': f"{losses.item():.2f}",     
+            'Span': f"{l_span:.2f}",
+            'IoU': f"{l_giou:.2f}",
+            'Cls': f"{l_label:.2f}",
+            'ISP': f"{l_isp:.3f}"  # 重点监控新增的 ISP
         })
     
-    # 计算 Epoch 平均值
-    avg_loss = total_loss / len(data_loader)
-    avg_span = total_span_loss / len(data_loader)
-    avg_giou = total_giou_loss / len(data_loader)
-    avg_cont = total_cont_loss / len(data_loader)
-    avg_sal = total_saliency_loss / len(data_loader)
-    avg_rec = total_recfw_loss / len(data_loader)   
-    avg_label = total_label_loss / len(data_loader) 
+    # [计算 Epoch 平均值]
+    num_batches = len(data_loader)
+    avg_loss = total_loss / num_batches
     
-    # 最终日志打印所有 Loss
+    avg_span = total_span_loss / num_batches
+    avg_giou = total_giou_loss / num_batches
+    avg_label = total_label_loss / num_batches
+    avg_qual = total_quality_loss / num_batches
+    avg_cont = total_cont_loss / num_batches
+    avg_sal = total_saliency_loss / num_batches
+    avg_rec = total_recfw_loss / num_batches   
+    avg_isp = total_isp_loss / num_batches
+    
+    # [最终日志打印] - 打印所有 8 个指标
     logger.info(
-        f"Epoch [{epoch}] Avg Loss: {avg_loss:.4f} | "
-        f"Cls: {avg_label:.4f} | "
-        f"Span: {avg_span:.4f} | "
-        f"GIoU: {avg_giou:.4f} | "
-        f"Sal: {avg_sal:.4f} | "
-        f"Cont: {avg_cont:.4f} | "
-        f"Rec: {avg_rec:.4f}"
+        f"Epoch [{epoch}] Avg Loss: {avg_loss:.4f}\n"
+        f"  - Label: {avg_label:.4f} | Quality: {avg_qual:.4f}\n"
+        f"  - Span:  {avg_span:.4f}  | GIoU:    {avg_giou:.4f}\n"
+        f"  - Sal:   {avg_sal:.4f}   | Cont:    {avg_cont:.4f}\n"
+        f"  - Rec:   {avg_rec:.4f}   | ISP:     {avg_isp:.4f}"
     )
     
     return avg_loss
@@ -124,6 +130,10 @@ def train_one_epoch(model, criterion, data_loader, optimizer, device, epoch):
 def main(args):
     device = torch.device(args.device)
     set_seed(args.seed)
+    logger.info(f"Checking Modules Status:")
+    logger.info(f"  - VCC: {args.use_vcc}")
+    logger.info(f"  - KWD: {args.use_kwd}")
+    logger.info(f"  - CSM: {args.use_csm}")
     
     # 1. 创建 Checkpoint 保存目录
     if not os.path.exists(args.save_dir):
@@ -239,13 +249,15 @@ def main(args):
     
     # [关键修改] 初始权重配置
     weight_dict = {
-        'loss_labels': 2.0, 
-        'loss_span': 5.0, 
-        'loss_giou': 2.0, 
-        'loss_quality': 2.0, 
-        'loss_saliency': 0.4, 
-        'loss_contrastive': 0.5, # [新增] 提升对比学习权重，辅助 Saliency 学习
-        'loss_recfw': 0.1        # 初始开启辅助任务
+        'loss_labels': args.label_loss_coef, 
+        'loss_span': args.span_loss_coef, 
+        'loss_giou': args.giou_loss_coef, 
+        'loss_quality': args.quality_loss_coef, 
+        'loss_saliency': args.lw_saliency, 
+        'loss_contrastive': args.eos_coef, 
+        'loss_recfw': args.recfw_loss_coef,
+        'loss_isp': getattr(args, 'isp_loss_coef', 1.0)
+        
     }
 
     if args.aux_loss:
@@ -254,7 +266,7 @@ def main(args):
             aux_weight_dict.update({k + f'_{i}': v for k, v in weight_dict.items()})
         weight_dict.update(aux_weight_dict)
 
-    losses = ['labels', 'spans', 'quality', 'recfw', 'saliency'] 
+    losses = ['labels', 'spans', 'quality', 'recfw', 'saliency', 'isp'] 
     criterion = SetCriterion(matcher, weight_dict, losses=losses, eos_coef=args.eos_coef)
     criterion.to(device)
 
@@ -266,10 +278,16 @@ def main(args):
     ]
     optimizer = torch.optim.AdamW(param_dicts, lr=args.lr, weight_decay=args.weight_decay)
 
-    lr_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+    #lr_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+    #    optimizer,
+    #    T_max=args.epochs,      
+    #    eta_min=args.lr * 0.01 
+    #)
+
+    lr_scheduler = torch.optim.lr_scheduler.MultiStepLR(
         optimizer,
-        T_max=args.epochs,      
-        eta_min=args.lr * 0.01 
+        milestones=[80, 120],  
+        gamma=0.1             
     )
 
     # Resume 逻辑
@@ -285,8 +303,8 @@ def main(args):
         logger.info(f"✅ Loaded {len(pretrained_dict)}/{len(model_dict)} parameters.")
         
         if args.start_epoch > 0 and 'optimizer_state_dict' in checkpoint:
-             optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-             args.start_epoch = checkpoint['epoch'] + 1
+            optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+            args.start_epoch = checkpoint['epoch'] + 1
 
     # -----------------------------------------------------------
     # 7. 训练循环
@@ -302,9 +320,7 @@ def main(args):
         # =======================================================
         # [核心逻辑] Loss Decay: 训练后期关闭辅助任务
         # =======================================================
-        # 假设 100 个 Epoch，前 40 个 Epoch 用于热身和特征对齐
-        # 40 个 Epoch 后关闭重构 Loss，专注回归
-        if epoch >= 40 and criterion.weight_dict['loss_recfw'] > 0:
+        if epoch >= args.epochs * 0.5 and criterion.weight_dict['loss_recfw'] > 0:
             logger.info(f"📉 Epoch {epoch}: Dropping RecFW Loss weight to 0.0!")
             criterion.weight_dict['loss_recfw'] = 0.0
             # 同时更新 aux_loss 中的 recfw
@@ -362,9 +378,16 @@ if __name__ == '__main__':
     if not any(action.dest == 'start_epoch' for action in parser._actions):
         parser.add_argument('--start_epoch', default=0, type=int, help='start epoch')
 
+    if not any(action.dest == 'isp_loss_coef' for action in parser._actions):
+        parser.add_argument('--isp_loss_coef', default=1.0, type=float, help='Coefficient for ISP loss')
+    if not any(action.dest == 'use_vcc' for action in parser._actions):
+        parser.add_argument('--use_vcc', action='store_true', default=True)
+        
+    if not any(action.dest == 'use_kwd' for action in parser._actions):
+        parser.add_argument('--use_kwd', action='store_true', default=True)
+        
+    if not any(action.dest == 'use_csm' for action in parser._actions):
+        parser.add_argument('--use_csm', action='store_true', default=True)
+
     args = parser.parse_args()
-    
-    if not hasattr(args, 'vocab_size'): args.vocab_size = 49408
-    if not hasattr(args, 'rec_fw'): args.rec_fw = True
-    
     main(args)

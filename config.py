@@ -21,7 +21,7 @@ def get_args_parser():
     parser.add_argument('--nheads', default=8, type=int)
     parser.add_argument('--enc_layers', default=2, type=int) # MESM Encoder 层数
     parser.add_argument('--dec_layers', default=3, type=int) # BAM Decoder 层数
-    parser.add_argument('--num_queries', default=10, type=int)
+    parser.add_argument('--num_queries', default=15, type=int)
     parser.add_argument('--t_feat_dim', default=512, type=int) # text dim
     parser.add_argument('--v_feat_dim', default=1024, type=int) # video dim
     parser.add_argument('--max_v_l', default=75, type=int)     # 最大视频序列长度
@@ -40,10 +40,10 @@ def get_args_parser():
     # Loss 系数
     parser.add_argument('--span_loss_coef', default=10, type=float)
     parser.add_argument('--giou_loss_coef', default=4, type=float)
-    parser.add_argument('--label_loss_coef', default=1, type=float)
+    parser.add_argument('--label_loss_coef', default=2, type=float)
     parser.add_argument('--aux_loss', default=True, type=bool)
     parser.add_argument('--span_loss_type', default="l1", type=str)
-    parser.add_argument('--eos_coef', default=0.1, type=float, help="Relative classification weight of the no-object class")
+    parser.add_argument('--eos_coef', default=0.5, type=float, help="Relative classification weight of the no-object class")
     parser.add_argument('--lw_saliency', default=0.2, type=float, help="Weight for saliency loss")
     
     # MESM 重构任务参数
@@ -51,10 +51,42 @@ def get_args_parser():
     parser.add_argument('--vocab_size', default=49408, type=int, help="CLIP 词表大小")
     parser.add_argument('--recfw_loss_coef', default=0.1, type=float, help="MESM 重构损失权重")
     
-    parser.add_argument('--quality_loss_coef', default=1.0, type=float, help="IoU 质量预测损失权重 (BAM-DETR 核心)")
+    parser.add_argument('--quality_loss_coef', default=2.0, type=float, help="IoU 质量预测损失权重 (BAM-DETR 核心)")
     
     # [新增] Resume 相关参数
     parser.add_argument('--resume', default='', help='resume from checkpoint')
     parser.add_argument('--start_epoch', default=0, type=int, metavar='N', help='start epoch')
 
+    # ========== Video Context Clustering 参数 ==========
+    parser.add_argument('--use_vcc', action='store_true', default=True,
+                        help='使用Video Context Clustering模块')
+    parser.add_argument('--no-use_vcc', dest='use_vcc', action='store_false',
+                        help='禁用Video Context Clustering模块')
+    parser.add_argument('--num_clusters', type=int, default=8,
+                        help='VCC中的聚类中心数量 (default: 8)')
+    
+    # ========== Keyword Weight Detection 参数 ==========
+    parser.add_argument('--use_kwd', action='store_true', default=True,
+                        help='使用Keyword Weight Detection模块')
+    parser.add_argument('--no-use_kwd', dest='use_kwd', action='store_false',
+                        help='禁用Keyword Weight Detection模块')
+    
+    # ========== ISP Loss 参数 ==========
+    parser.add_argument('--lw_isp', type=float, default=1.0,
+                        help='ISP Loss的权重 (default: 1.0)')
+    parser.add_argument('--isp_temperature', type=float, default=0.07,
+                        help='ISP Loss的温度系数 (default: 0.07)')
+    parser.add_argument('--isp_local_weight', type=float, default=0.3,
+                        help='ISP Loss中局部对齐的权重 (default: 0.3)')
+    
+    # ========== Clip Semantic Mining 参数 ==========
+    parser.add_argument('--use_csm', action='store_true', default=True,
+                        help='使用Clip Semantic Mining模块')
+    parser.add_argument('--no-use_csm', dest='use_csm', action='store_false',
+                        help='禁用Clip Semantic Mining模块')
+    parser.add_argument('--num_csm_layers', type=int, default=2,
+                        help='CSM模块的层数 (default: 2)')
+    parser.add_argument('--num_clips_for_mining', type=int, default=4,
+                        help='CSM将视频分成多少个clips进行语义挖掘 (default: 4)')
+    
     return parser
