@@ -1,3 +1,12 @@
+"""
+main_optimized.py - 优化版本
+
+主要改进:
+1. bbox_embed 使用更高的学习率 (5倍)
+2. 使用 CosineAnnealingWarmRestarts 学习率调度
+3. 打印当前学习率便于监控
+"""
+
 import torch
 import os
 import time
@@ -38,12 +47,12 @@ def train_one_epoch(model, criterion, data_loader, optimizer, device, epoch):
     # [统计变量初始化] - 确保初始化所有 8 个 Loss
     total_span_loss = 0
     total_giou_loss = 0
-    total_label_loss = 0      # 原有：分类 Loss
-    total_quality_loss = 0    # 原有：质量预测 Loss
-    total_cont_loss = 0       # 原有：文本视频对比 Loss
+    total_label_loss = 0
+    total_quality_loss = 0
+    total_cont_loss = 0
     total_saliency_loss = 0
     total_recfw_loss = 0   
-    total_isp_loss = 0        # [新增]：ISP Loss
+    total_isp_loss = 0
     
     pbar = tqdm(enumerate(data_loader), total=len(data_loader), desc=f"Epoch {epoch} Train")
     
@@ -52,7 +61,6 @@ def train_one_epoch(model, criterion, data_loader, optimizer, device, epoch):
         video_mask = batch['video_mask'].to(device)
         words_id = batch['words_id'].to(device)
         words_mask = batch['words_mask'].to(device)
-        # 兼容不同格式的 targets
         targets = [{k: v.to(device) if isinstance(v, torch.Tensor) else v for k, v in t.items()} for t in batch['targets']]
 
         # Forward
@@ -74,15 +82,15 @@ def train_one_epoch(model, criterion, data_loader, optimizer, device, epoch):
         
         total_loss += losses.item()
         
-        # [提取所有 Loss] - 如果字典里没有，默认返回 0
+        # [提取所有 Loss]
         l_span = loss_dict.get('loss_span', torch.tensor(0.0)).item()
         l_giou = loss_dict.get('loss_giou', torch.tensor(0.0)).item()
-        l_label = loss_dict.get('loss_labels', torch.tensor(0.0)).item()       # 恢复
-        l_qual = loss_dict.get('loss_quality', torch.tensor(0.0)).item()       # 恢复
-        l_cont = loss_dict.get('loss_contrastive', torch.tensor(0.0)).item()   # 恢复
+        l_label = loss_dict.get('loss_labels', torch.tensor(0.0)).item()
+        l_qual = loss_dict.get('loss_quality', torch.tensor(0.0)).item()
+        l_cont = loss_dict.get('loss_contrastive', torch.tensor(0.0)).item()
         l_sal = loss_dict.get('loss_saliency', torch.tensor(0.0)).item()
         l_rec = loss_dict.get('loss_recfw', torch.tensor(0.0)).item()    
-        l_isp = loss_dict.get('loss_isp', torch.tensor(0.0)).item()            # 新增
+        l_isp = loss_dict.get('loss_isp', torch.tensor(0.0)).item()
         
         # [累加统计]
         total_span_loss += l_span
@@ -94,13 +102,12 @@ def train_one_epoch(model, criterion, data_loader, optimizer, device, epoch):
         total_recfw_loss += l_rec    
         total_isp_loss += l_isp
         
-        # [实时进度条] - 显示最重要的几个 (避免太长显示不下)
         pbar.set_postfix({
             'Loss': f"{losses.item():.2f}",     
             'Span': f"{l_span:.2f}",
             'IoU': f"{l_giou:.2f}",
             'Cls': f"{l_label:.2f}",
-            'ISP': f"{l_isp:.3f}"  # 重点监控新增的 ISP
+            'ISP': f"{l_isp:.3f}"
         })
     
     # [计算 Epoch 平均值]
@@ -116,7 +123,6 @@ def train_one_epoch(model, criterion, data_loader, optimizer, device, epoch):
     avg_rec = total_recfw_loss / num_batches   
     avg_isp = total_isp_loss / num_batches
     
-    # [最终日志打印] - 打印所有 8 个指标
     logger.info(
         f"Epoch [{epoch}] Avg Loss: {avg_loss:.4f}\n"
         f"  - Label: {avg_label:.4f} | Quality: {avg_qual:.4f}\n"
@@ -158,7 +164,15 @@ def main(args):
             root_logger.removeHandler(h)
     root_logger.addHandler(file_handler)
     
-    logger.info(f"✅ Log file created at: {log_path}")
+    logger.info(f"Log file created at: {log_path}")
+    
+    # ----------------------
+    logger.info("=" * 60)
+    logger.info("Training Configuration:")
+    for key, value in sorted(vars(args).items()):
+        logger.info(f"  {key}: {value}")
+    logger.info("=" * 60)
+    # -----------------------
     logger.info(f"initializing Dataset: {args.dataset_name}")
     
     # -----------------------------------------------------------
@@ -243,11 +257,10 @@ def main(args):
     model.to(device)
 
     # -----------------------------------------------------------
-    # 5. 匹配器和损失 (配置初始权重)
+    # 5. 匹配器和损失
     # -----------------------------------------------------------
     matcher = HungarianMatcher(cost_class=2, cost_span=5, cost_giou=2)
     
-    # [关键修改] 初始权重配置
     weight_dict = {
         'loss_labels': args.label_loss_coef, 
         'loss_span': args.span_loss_coef, 
@@ -257,7 +270,6 @@ def main(args):
         'loss_contrastive': args.eos_coef, 
         'loss_recfw': args.recfw_loss_coef,
         'loss_isp': getattr(args, 'isp_loss_coef', 1.0)
-        
     }
 
     if args.aux_loss:
@@ -271,24 +283,43 @@ def main(args):
     criterion.to(device)
 
     # -----------------------------------------------------------
-    # 6. 优化器与调度器
+    # 6. 优化器与调度器 [核心改进]
     # -----------------------------------------------------------
+    
+    # [改进1] 分离 bbox_embed 参数，使用更高学习率
+    bbox_embed_params = []
+    other_params = []
+    
+    for name, param in model.named_parameters():
+        if not param.requires_grad:
+            continue
+        if "text_encoder" in name:
+            continue
+        if "bbox_embed" in name:
+            bbox_embed_params.append(param)
+            logger.info(f"  [bbox_embed 5x LR] {name}")
+        else:
+            other_params.append(param)
+    
+    logger.info(f"bbox_embed params: {len(bbox_embed_params)}, other params: {len(other_params)}")
+    
+    # bbox_embed 使用 5 倍学习率
     param_dicts = [
-        {"params": [p for n, p in model.named_parameters() if "text_encoder" not in n and p.requires_grad], "lr": args.lr},
+        {"params": other_params, "lr": args.lr},
+        {"params": bbox_embed_params, "lr": args.lr * 5},
     ]
+    
     optimizer = torch.optim.AdamW(param_dicts, lr=args.lr, weight_decay=args.weight_decay)
 
-    #lr_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-    #    optimizer,
-    #    T_max=args.epochs,      
-    #    eta_min=args.lr * 0.01 
-    #)
-
-    lr_scheduler = torch.optim.lr_scheduler.MultiStepLR(
+    # [改进2] 使用 CosineAnnealingWarmRestarts
+    lr_scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
         optimizer,
-        milestones=[80, 120],  
-        gamma=0.1             
+        T_0=30,
+        T_mult=2,
+        eta_min=1e-6
     )
+    
+    logger.info(f"Using CosineAnnealingWarmRestarts scheduler (T_0=30, T_mult=2)")
 
     # Resume 逻辑
     if args.resume:
@@ -296,11 +327,10 @@ def main(args):
         checkpoint = torch.load(args.resume, map_location='cpu')
         model_dict = model.state_dict()
         pretrained_dict = checkpoint['model_state_dict']
-        # 过滤不匹配的键 (如 saliency_proj)
         pretrained_dict = {k: v for k, v in pretrained_dict.items() if k in model_dict and v.shape == model_dict[k].shape}
         model_dict.update(pretrained_dict)
         model.load_state_dict(model_dict)
-        logger.info(f"✅ Loaded {len(pretrained_dict)}/{len(model_dict)} parameters.")
+        logger.info(f"Loaded {len(pretrained_dict)}/{len(model_dict)} parameters.")
         
         if args.start_epoch > 0 and 'optimizer_state_dict' in checkpoint:
             optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
@@ -317,17 +347,18 @@ def main(args):
     
     for epoch in range(args.start_epoch, args.epochs):
         
-        # =======================================================
-        # [核心逻辑] Loss Decay: 训练后期关闭辅助任务
-        # =======================================================
+        # [打印当前学习率]
+        current_lr = optimizer.param_groups[0]['lr']
+        bbox_lr = optimizer.param_groups[1]['lr'] if len(optimizer.param_groups) > 1 else current_lr
+        logger.info(f"Epoch {epoch} LR: {current_lr:.2e} | bbox_embed LR: {bbox_lr:.2e}")
+        
+        # Loss Decay: 训练后期关闭辅助任务
         if epoch >= args.epochs * 0.5 and criterion.weight_dict['loss_recfw'] > 0:
-            logger.info(f"📉 Epoch {epoch}: Dropping RecFW Loss weight to 0.0!")
+            logger.info(f"Epoch {epoch}: Dropping RecFW Loss weight to 0.0!")
             criterion.weight_dict['loss_recfw'] = 0.0
-            # 同时更新 aux_loss 中的 recfw
             for k in criterion.weight_dict.keys():
                 if 'recfw' in k:
                     criterion.weight_dict[k] = 0.0
-        # =======================================================
 
         train_one_epoch(model, criterion, dataloader_train, optimizer, device, epoch)
         lr_scheduler.step()
@@ -342,17 +373,17 @@ def main(args):
             if curr_r1_07 > best_r1_07:
                 best_r1_07 = curr_r1_07
                 torch.save({'epoch': epoch, 'model_state_dict': model.state_dict(), 'metrics': metrics}, os.path.join(args.save_dir, "checkpoint_best_r1_07.pth"))
-                logger.info(f"⭐ New Best R1@0.7: {best_r1_07:.2f}%")
+                logger.info(f"⭐  New Best R1@0.7: {best_r1_07:.2f}%")
 
             if curr_r1_05 > best_r1_05:
                 best_r1_05 = curr_r1_05
                 torch.save({'epoch': epoch, 'model_state_dict': model.state_dict(), 'metrics': metrics}, os.path.join(args.save_dir, "checkpoint_best_r1_05.pth"))
-                logger.info(f"⭐ New Best R1@0.5: {best_r1_05:.2f}%")
+                logger.info(f"⭐  New Best R1@0.5: {best_r1_05:.2f}%")
                 
             if curr_comb > best_combined:
                 best_combined = curr_comb
                 torch.save({'epoch': epoch, 'model_state_dict': model.state_dict(), 'metrics': metrics}, os.path.join(args.save_dir, "checkpoint_best_combined.pth"))
-                logger.info(f"⭐ New Best Combined: {best_combined:.2f}")
+                logger.info(f"⭐  New Best Combined: {best_combined:.2f}")
 
         # 保存最新模型
         torch.save({
@@ -361,10 +392,18 @@ def main(args):
             'optimizer_state_dict': optimizer.state_dict(),
             'args': args
         }, os.path.join(args.save_dir, "checkpoint_last.pth"))
+    
+    # 训练结束
+    logger.info("=" * 60)
+    logger.info(f"Training finished!")
+    logger.info(f"   Best R1@0.5: {best_r1_05:.2f}%")
+    logger.info(f"   Best R1@0.7: {best_r1_07:.2f}%")
+    logger.info(f"   Best Combined: {best_combined:.2f}")
+    logger.info("=" * 60)
 
 if __name__ == '__main__':
     parser = get_args_parser()
-    # 补全可能缺失的 args
+    
     if not any(action.dest == 'text_encoder_type' for action in parser._actions):
         parser.add_argument('--text_encoder_type', default='clip', choices=['clip', 'glove'], help='Type of text encoder')
     if not any(action.dest == 'glove_path' for action in parser._actions):
@@ -372,7 +411,6 @@ if __name__ == '__main__':
     if not any(action.dest == 'clip_weight_path' for action in parser._actions):
         parser.add_argument('--clip_weight_path', default='', type=str, help='Path to pretrained CLIP weights')
     
-    # [新增] Resume 参数
     if not any(action.dest == 'resume' for action in parser._actions):
         parser.add_argument('--resume', default='', help='resume from checkpoint')
     if not any(action.dest == 'start_epoch' for action in parser._actions):
@@ -382,10 +420,8 @@ if __name__ == '__main__':
         parser.add_argument('--isp_loss_coef', default=1.0, type=float, help='Coefficient for ISP loss')
     if not any(action.dest == 'use_vcc' for action in parser._actions):
         parser.add_argument('--use_vcc', action='store_true', default=True)
-        
     if not any(action.dest == 'use_kwd' for action in parser._actions):
         parser.add_argument('--use_kwd', action='store_true', default=True)
-        
     if not any(action.dest == 'use_csm' for action in parser._actions):
         parser.add_argument('--use_csm', action='store_true', default=True)
 

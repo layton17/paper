@@ -7,6 +7,30 @@ from isp_loss import EnhancedISPLoss
 
 logger = logging.getLogger(__name__)
 
+def sigmoid_focal_loss(inputs, targets, alpha: float = 0.25, gamma: float = 2.0, reduction: str = "none"):
+    """
+    Focal Loss implementation for binary classification
+    Args:
+        inputs: Logits (before sigmoid)
+        targets: Binary targets (0 or 1)
+        alpha: Weight for positive class (0 < alpha < 1)
+        gamma: Focusing parameter
+    """
+    p = torch.sigmoid(inputs)
+    ce_loss = F.binary_cross_entropy_with_logits(inputs, targets, reduction="none")
+    p_t = p * targets + (1 - p) * (1 - targets)
+    loss = ce_loss * ((1 - p_t) ** gamma)
+
+    if alpha >= 0:
+        alpha_t = alpha * targets + (1 - alpha) * (1 - targets)
+        loss = alpha_t * loss
+
+    if reduction == "mean":
+        return loss.mean()
+    elif reduction == "sum":
+        return loss.sum()
+    return loss
+
 class SetCriterion(nn.Module):
     def __init__(self, matcher, weight_dict, losses, eos_coef, span_loss_type="l1", temperature=0.07):
         super().__init__()
@@ -83,23 +107,43 @@ class SetCriterion(nn.Module):
         L = saliency_scores.shape[1]
         grid = torch.arange(L, device=saliency_scores.device).float().unsqueeze(0)
         
+        # 生成高斯分布的 GT
         for i, t in enumerate(targets):
             spans = t['spans']
             if len(spans) == 0: continue
             centers = spans[:, 0] * L
             widths = spans[:, 1] * L
+            # 注意：这里稍微调小了 sigma 的分母，让 GT 更尖锐一点，更容易学习
             for c, w in zip(centers, widths):
-                sigma = (w / 4.0).clamp(min=1.5)
+                sigma = (w / 3.0).clamp(min=1.0) 
                 gaussian = torch.exp(- (grid - c)**2 / (2 * sigma**2))
                 gt_saliency[i] = torch.max(gt_saliency[i], gaussian.squeeze(0))
         
+        # 制作成 0/1 标签用于 Focal Loss (或者保留软标签)
+        # Focal Loss 通常配合 0/1 标签，但软标签在 DETR 类方法中也常用
+        # 这里我们保留高斯软标签，但截断一下以减少噪声
+        gt_saliency = gt_saliency.clamp(0, 1)
+
         if video_mask is not None:
             saliency_scores = saliency_scores * video_mask.float()
             gt_saliency = gt_saliency * video_mask.float()
             
-        # [ä¼˜åŒ–] ä½¿ç”¨ Pos Weight å¹³è¡¡å‰æ™¯èƒŒæ™¯
-        pos_weight = torch.tensor([5.0], device=saliency_scores.device)
-        loss = F.binary_cross_entropy_with_logits(saliency_scores, gt_saliency, pos_weight=pos_weight, reduction='none')
+            # 如果是 Padding 区域，强制 Mask 掉 Loss
+            # (Focal Loss function 没有 mask 参数，所以我们手动置零)
+            
+        # 使用 Focal Loss
+        # alpha=0.25 (降低背景权重), gamma=2.0 (关注难样本)
+        loss = sigmoid_focal_loss(
+            saliency_scores, 
+            gt_saliency, 
+            alpha=0.25, 
+            gamma=2.0, 
+            reduction='none'
+        )
+        
+        if video_mask is not None:
+            loss = loss * video_mask.float()
+            
         return {'loss_saliency': loss.sum() / num_valid_frames}
 
     def loss_quality(self, outputs, targets, indices, num_spans):

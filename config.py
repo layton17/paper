@@ -89,4 +89,11 @@ def get_args_parser():
     parser.add_argument('--num_clips_for_mining', type=int, default=4,
                         help='CSM将视频分成多少个clips进行语义挖掘 (default: 4)')
     
+    
+    
+    # ===================================================
+    parser.add_argument('--use_detail_fusion', action='store_true', default=True,
+                        help='使用DetailPreservingFusion 模块')
+    
+    
     return parser

@@ -131,7 +131,10 @@ class MESM_W2W_BAM_MinimalFix(nn.Module):
         )
         self.input_vid_proj = nn.Sequential(
             nn.LayerNorm(args.v_feat_dim),
-            nn.Linear(args.v_feat_dim, args.hidden_dim)
+            nn.Linear(args.v_feat_dim, args.hidden_dim * 2),
+            nn.ReLU(),
+            nn.Dropout(0.1),  # 加一点 Dropout 防止过拟合
+            nn.Linear(args.hidden_dim * 2, args.hidden_dim)
         )
         
         self.vid_pos_embed, _ = build_position_encoding(args)
@@ -389,20 +392,39 @@ class MESM_W2W_BAM_MinimalFix(nn.Module):
         is_peak = (refined_sal > padded_sal[:, :-2]) & (refined_sal > padded_sal[:, 2:])
         peak_scores = refined_sal * is_peak.float()
         
+        # ========== 混合锚点策略 (Hybrid Anchors) ==========
+        # 目的：防止训练初期 Saliency 乱猜导致模型难以收敛
+        
+        num_queries = self.args.num_queries
+        num_fixed = num_queries // 2             # 一半做固定锚点 (e.g., 7个)
+        num_dynamic = num_queries - num_fixed    # 一半做动态锚点 (e.g., 8个)
+        
+        # --- A. 动态锚点 (来自 Saliency Top-K) ---
         topk_scores, topk_indices = torch.topk(peak_scores, num_dynamic, dim=1) 
         
         L_feat = memory.shape[1]
         dynamic_centers = (topk_indices.float() + 0.5) / L_feat 
         dynamic_centers = dynamic_centers.clamp(min=0.01, max=0.99)
         
-        dynamic_widths = self.query_embed.weight[num_static:].sigmoid()[..., 1:] 
+        # 动态锚点的宽度 (使用 Query Embed 的前半部分)
+        dynamic_widths = self.query_embed.weight[:num_dynamic].sigmoid()[..., 1:] 
         dynamic_widths = dynamic_widths.unsqueeze(0).expand(memory.shape[0], -1, -1)
         
-        static_centers = static_centers.unsqueeze(0).expand(memory.shape[0], -1) 
-        static_widths = static_widths.unsqueeze(0).expand(memory.shape[0], -1, -1)
+        # --- B. 固定锚点 (均匀分布) ---
+        # 在 0-1 之间均匀生成锚点，例如: [0.1, 0.25, ..., 0.9]
+        # 注意要用 device
+        fixed_centers_val = torch.linspace(0.05, 0.95, steps=num_fixed, device=memory.device)
+        fixed_centers = fixed_centers_val.unsqueeze(0).expand(memory.shape[0], -1) # [B, N_fixed]
         
-        all_centers = torch.cat([static_centers, dynamic_centers], dim=1)  
-        all_widths = torch.cat([static_widths, dynamic_widths], dim=1)     
+        # 固定锚点的宽度 (使用 Query Embed 的后半部分)
+        fixed_widths = self.query_embed.weight[num_dynamic:].sigmoid()[..., 1:]
+        fixed_widths = fixed_widths.unsqueeze(0).expand(memory.shape[0], -1, -1)
+        
+        # --- C. 拼接 ---
+        # [B, N_dynamic + N_fixed]
+        all_centers = torch.cat([dynamic_centers, fixed_centers], dim=1)  
+        # [B, N_dynamic + N_fixed, 2]
+        all_widths = torch.cat([dynamic_widths, fixed_widths], dim=1)     
         
         d_s = all_widths[..., 0]
         d_e = all_widths[..., 1]
@@ -411,6 +433,8 @@ class MESM_W2W_BAM_MinimalFix(nn.Module):
         end   = (all_centers + d_e).clamp(min=1e-4, max=1-1e-4)
         
         query_pos = torch.stack([inverse_sigmoid(start), inverse_sigmoid(end)], dim=-1) 
+        
+        # ==========================================================
         
         # 3. Decoder
         tgt = torch.zeros((num_q, memory.shape[0], self.hidden_dim), 
