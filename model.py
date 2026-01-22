@@ -314,7 +314,7 @@ class MESM_W2W_BAM_MinimalFix(nn.Module):
         recfw_words_logit = None
         masked_indices = None
         if self.rec_fw and is_training:
-            masked_src_txt, mask_selection = self._mask_words(src_txt, words_mask, self.masked_token)
+            masked_src_txt, mask_selection = self._mask_words(src_txt, words_mask, self.masked_token, mask_ratio=0.33)
             masked_indices = mask_selection
             rec_out_text_len = self.enhance_encoder(
                 query=masked_src_txt, key=src_vid,

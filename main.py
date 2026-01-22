@@ -69,6 +69,9 @@ def train_one_epoch(model, criterion, data_loader, optimizer, device, epoch):
         # Loss Calculation
         loss_dict = criterion(outputs, targets)
         weight_dict = criterion.weight_dict
+        #强制清零 Rec Loss 
+        if epoch >= args.epochs * 0.5:
+             if 'loss_recfw' in loss_dict: loss_dict['loss_recfw'] = loss_dict['loss_recfw'] * 0.0
         
         # 计算加权总 Loss
         losses = sum(loss_dict[k] * weight_dict[k] for k in loss_dict.keys() if k in weight_dict)
@@ -306,17 +309,22 @@ def main(args):
     # bbox_embed 使用 5 倍学习率
     param_dicts = [
         {"params": other_params, "lr": args.lr},
-        {"params": bbox_embed_params, "lr": args.lr * 5},
+        {"params": bbox_embed_params, "lr": args.lr * 2},
     ]
     
     optimizer = torch.optim.AdamW(param_dicts, lr=args.lr, weight_decay=args.weight_decay)
 
-    # [改进2] 使用 CosineAnnealingWarmRestarts
-    lr_scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
+    #使用 CosineAnnealingWarmRestarts
+    #lr_scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
+    #    optimizer,
+    #    T_0=30,
+    #    T_mult=2,
+    #    eta_min=1e-6
+    #)
+    lr_scheduler = torch.optim.lr_scheduler.MultiStepLR(
         optimizer,
-        T_0=30,
-        T_mult=2,
-        eta_min=1e-6
+        milestones=[args.epochs * 0.35, args.epochs * 0.7], 
+        gamma=0.1
     )
     
     logger.info(f"Using CosineAnnealingWarmRestarts scheduler (T_0=30, T_mult=2)")
@@ -353,12 +361,12 @@ def main(args):
         logger.info(f"Epoch {epoch} LR: {current_lr:.2e} | bbox_embed LR: {bbox_lr:.2e}")
         
         # Loss Decay: 训练后期关闭辅助任务
-        if epoch >= args.epochs * 0.5 and criterion.weight_dict['loss_recfw'] > 0:
-            logger.info(f"Epoch {epoch}: Dropping RecFW Loss weight to 0.0!")
-            criterion.weight_dict['loss_recfw'] = 0.0
-            for k in criterion.weight_dict.keys():
+        if epoch >= args.epochs * 0.5:
+            #logger.info(f"Epoch {epoch}: Dropping RecFW Loss weight to 0.02!")
+            criterion.weight_dict['loss_recfw'] = 0.02
+            for k in list(criterion.weight_dict.keys()):
                 if 'recfw' in k:
-                    criterion.weight_dict[k] = 0.0
+                    criterion.weight_dict[k] = 0.02
 
         train_one_epoch(model, criterion, dataloader_train, optimizer, device, epoch)
         lr_scheduler.step()

@@ -7,14 +7,30 @@ from isp_loss import EnhancedISPLoss
 
 logger = logging.getLogger(__name__)
 
+def quality_focal_loss(inputs, targets, beta=2.0):
+    """
+    Quality Focal Loss (QFL) implementation
+    Args:
+        inputs: Logits (before sigmoid), shape [N, 1] or [N]
+        targets: Quality targets (IoU), shape [N, 1] or [N], value in [0, 1]
+        beta: Focusing parameter (controls how much to down-weight easy examples)
+    """
+    probs = torch.sigmoid(inputs)
+    
+    # Cross Entropy with Soft Targets
+    # BCEWithLogitsLoss 支持软标签
+    ce_loss = F.binary_cross_entropy_with_logits(inputs, targets, reduction='none')
+    
+    # Modulation factor: |y - p|^beta
+    # 当预测值 p 接近目标 y 时，权重降低
+    modulating_factor = torch.abs(targets - probs) ** beta
+    
+    loss = modulating_factor * ce_loss
+    return loss
+
 def sigmoid_focal_loss(inputs, targets, alpha: float = 0.25, gamma: float = 2.0, reduction: str = "none"):
     """
-    Focal Loss implementation for binary classification
-    Args:
-        inputs: Logits (before sigmoid)
-        targets: Binary targets (0 or 1)
-        alpha: Weight for positive class (0 < alpha < 1)
-        gamma: Focusing parameter
+    Original Focal Loss implementation for binary classification
     """
     p = torch.sigmoid(inputs)
     ce_loss = F.binary_cross_entropy_with_logits(inputs, targets, reduction="none")
@@ -60,18 +76,39 @@ class SetCriterion(nn.Module):
         return b_idx, s_idx
 
     def loss_labels(self, outputs, targets, indices, num_spans, log=True):
+        """
+        Classification loss (Standard Focal Loss)
+        """
         assert 'pred_logits' in outputs
-        src_logits = outputs['pred_logits']
+        src_logits = outputs['pred_logits'] # [B, N, 2]
+        
+        # 获取匹配索引
         idx = self._get_src_permutation_idx(indices)
         idx = self._check_and_clamp(idx, src_logits.shape, name="loss_labels")
         b_idx, s_idx = idx
         
-        target_classes_o = torch.cat([torch.zeros_like(t["labels"][J]) for t, (_, J) in zip(targets, indices)])
-        target_classes = torch.full(src_logits.shape[:2], 1, dtype=torch.int64, device=src_logits.device)
-        target_classes[b_idx, s_idx] = target_classes_o
+        # 1. 准备 Logits (只取前景部分, index 0)
+        src_logits_foreground = src_logits[..., 0] 
+
+        # 2. [关键修复] 重新定义 target_classes_onehot (Hard Label: 0 or 1)
+        # 初始化全 0 (背景)
+        target_classes_onehot = torch.zeros(src_logits.shape[:2], dtype=torch.float, device=src_logits.device)
+        # 匹配到的位置设为 1.0 (前景)
+        target_classes_onehot[b_idx, s_idx] = 1.0 
+
+        # 3. 计算 Standard Focal Loss
+        # 确保你之前的 sigmoid_focal_loss 函数定义已经加回到了文件头部
+        loss = sigmoid_focal_loss(
+            src_logits_foreground, 
+            target_classes_onehot, 
+            alpha=0.5, 
+            gamma=2.0, 
+            reduction='none'
+        )
         
-        loss_ce = F.cross_entropy(src_logits.transpose(1, 2), target_classes, self.empty_weight)
-        return {'loss_labels': loss_ce}
+        # 归一化
+        loss = loss.sum() / num_spans
+        return {'loss_labels': loss}
 
     def loss_spans(self, outputs, targets, indices, num_spans):
         assert 'pred_spans' in outputs
