@@ -31,10 +31,7 @@ def evaluate(model, data_loader, device):
         scores = prob[..., 0] # 前景概率
         quality_scores = pred_quality.sigmoid().squeeze(-1) # 预测的 IoU
         
-        
-        #alpha = 0.7
-        #combined_scores = (scores ** alpha) * (quality_scores ** (1-alpha))
-        combined_scores = (scores ** 1.5) * (quality_scores ** 0.5)
+        combined_scores = scores * quality_scores
         
         # 2. 坐标处理
         # pred_spans 已经是 start/end 格式，直接限制在 [0, 1] 范围内
@@ -60,7 +57,7 @@ def evaluate(model, data_loader, device):
             boxes[:, 3] = 1.0             # y2
             
             # 执行 NMS, IoU 阈值
-            keep_indices = nms(boxes, cur_scores, iou_threshold=0.50)
+            keep_indices = nms(boxes, cur_scores, iou_threshold=0.45)
             
             # 根据 NMS 结果筛选预测
             final_spans = cur_spans[keep_indices]

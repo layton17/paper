@@ -40,7 +40,7 @@ def get_args_parser():
     # Loss 系数
     parser.add_argument('--span_loss_coef', default=10, type=float)
     parser.add_argument('--giou_loss_coef', default=4, type=float)
-    parser.add_argument('--label_loss_coef', default=2, type=float)
+    parser.add_argument('--label_loss_coef', default=4, type=float)
     parser.add_argument('--aux_loss', default=True, type=bool)
     parser.add_argument('--span_loss_type', default="l1", type=str)
     parser.add_argument('--eos_coef', default=0.5, type=float, help="Relative classification weight of the no-object class")
@@ -49,7 +49,7 @@ def get_args_parser():
     # MESM 重构任务参数
     parser.add_argument('--rec_fw', action='store_true', default=True, help="是否开启 Frame-Word 重构增强")
     parser.add_argument('--vocab_size', default=49408, type=int, help="CLIP 词表大小")
-    parser.add_argument('--recfw_loss_coef', default=0.05, type=float, help="MESM 重构损失权重")
+    parser.add_argument('--recfw_loss_coef', default=0.1, type=float, help="MESM 重构损失权重")
     
     parser.add_argument('--quality_loss_coef', default=2.0, type=float, help="IoU 质量预测损失权重 (BAM-DETR 核心)")
     

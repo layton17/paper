@@ -9,33 +9,10 @@ python main.py --dataset_name charades --feature_dir /root/autodl-tmp/paper/data
 python main.py   --dataset_name charades   --feature_dir /root/autodl-tmp/paper/data/charades/features/slowfast_feats_1fps/   --clip_visual_path /root/autodl-tmp/paper/data/charades/features/clip_feats_1fps/   --annotation_path /root/autodl-tmp/paper/data/charades/annotations/charades_sta_train.txt   --save_dir ./checkpoints/charades_SfcC_fix_loss   --text_encoder_type precomputed   --v_feat_dim 2816   --feature_fps 1   --feature_stride 1   --max_v_l 75   --max_q_l 32   --batch_size 64   --epochs 100   --lr 1e-4   --device cuda   --cached_text_path ./data/charades/charades_clip_text_features.pt
  
 # 优化后的训练命令
-python main.py --dataset_name charades --feature_dir /root/autodl-tmp/paper/data/charades/features/slowfast_feats_1fps/ --clip_visual_path /root/autodl-tmp/paper/data/charades/features/clip_feats_1fps/ --annotation_path /root/autodl-tmp/paper/data/charades/annotations/charades_sta_train.txt --save_dir ./checkpoints/charades_enhanced --text_encoder_type precomputed --num_queries 15 --v_feat_dim 2816 --feature_fps 1 --max_v_l 75 --max_q_l 32 --batch_size 48 --epochs 150 --lr 5e-5 --weight_decay 5e-5 --span_loss_coef 15 --giou_loss_coef 6 --quality_loss_coef 2.0 --lw_saliency 0.3 --device cuda --cached_text_path ./data/charades/charades_clip_text_features.pt --hidden_dim 384 --dec_layers 4 
-
-python main.py \
-  --dataset_name charades \
-  --feature_dir /root/autodl-tmp/paper/data/charades/features/slowfast_feats_1fps/ \
-  --clip_visual_path /root/autodl-tmp/paper/data/charades/features/clip_feats_1fps/ \
-  --annotation_path /root/autodl-tmp/paper/data/charades/annotations/charades_sta_train.txt \
-  --save_dir ./checkpoints/charades_enhanced \
-  --text_encoder_type precomputed \
-  --v_feat_dim 2816 \
-  --feature_fps 1 \
-  --max_v_l 75 \
-  --max_q_l 32 \
-  --hidden_dim 384 \
-  --weight_decay 5e-5 \
-  --num_queries 16 \
-  --dec_layers 6 \
-  --batch_size 32 \
-  --lr 1e-4 \
-  --span_loss_coef 4 \
-  --giou_loss_coef 2 \
-  --label_loss_coef 2.0 \
-  --lw_saliency 10.0 \
-  --quality_loss_coef 2.0 \
-  --epochs 150
+python main.py --dataset_name charades --feature_dir /root/autodl-tmp/paper/data/charades/features/slowfast_feats_1fps/ --clip_visual_path /root/autodl-tmp/paper/data/charades/features/clip_feats_1fps/ --annotation_path /root/autodl-tmp/paper/data/charades/annotations/charades_sta_train.txt --save_dir ./checkpoints/charades_enhanced --text_encoder_type precomputed --device cuda --cached_text_path ./data/charades/charades_clip_text_features.pt --hidden_dim 384 --dec_layers 8 --num_queries 15 --v_feat_dim 2816 --feature_fps 1 --max_v_l 75 --max_q_l 32 --batch_size 32 --epochs 150 --lr 5e-5 --weight_decay 5e-5 --span_loss_coef 4 --giou_loss_coef 2 --quality_loss_coef 2.0 --lw_saliency 10.0 --isp_loss_coef 1.0 --label_loss_coef 4.0 --recfw_loss_coef 0.05
 
 
+python eval.py --dataset_name charades --feature_dir /root/autodl-tmp/paper/data/charades/features/clip_feats_24fps_stride4/ --annotation_path /root/autodl-tmp/paper/data/charades/annotations/charades_sta_test.txt --text_encoder_type glove --glove_path /root/autodl-tmp/dolma_300_2024_1.2M.100_combined.txt --resume ./checkpoints/charades_glove_run/checkpoint_epoch_50.pth --v_feat_dim 512 --t_feat_dim 300 --hidden_dim 256 --max_v_l 75 --max_q_l 32 --batch_size 32 --device cuda
 
 python main.py \
     --dataset_name charades \
@@ -44,90 +21,28 @@ python main.py \
     --annotation_path /root/autodl-tmp/paper/data/charades/annotations/charades_sta_train.txt \
     --save_dir ./checkpoints/charades_enhanced \
     --text_encoder_type precomputed \
-    --v_feat_dim 2816 \
-    --hidden_dim 384 \
-    --num_queries 16 \
-    --dec_layers 6 \
-    --batch_size 32 \
-    --lr 5e-5 \
-    --epochs 100 \
-    --weight_decay 1e-4 \
-    --label_loss_coef 5.0 \
-    --span_loss_coef 2.0 \
-    --giou_loss_coef 2.0 \
-    --quality_loss_coef 1.0 \
-    --recfw_loss_coef 0.0 \
-    --lw_saliency 1.0
-
-
-
-
-
-
-
-
-#0121
-python main.py \
-    --dataset_name charades \
-    --feature_dir /root/autodl-tmp/paper/data/charades/features/slowfast_feats_1fps/ \
-    --clip_visual_path /root/autodl-tmp/paper/data/charades/features/clip_feats_1fps/ \
-    --annotation_path /root/autodl-tmp/paper/data/charades/annotations/charades_sta_train.txt \
-    --save_dir ./checkpoints/charades_final_boost \
-    --text_encoder_type precomputed \
+    --cached_text_path ./data/charades/charades_clip_text_features.pt \
     --v_feat_dim 2816 \
     --feature_fps 1 \
     --max_v_l 75 \
     --max_q_l 32 \
-    --hidden_dim 384 \
-    --num_queries 16 \
-    --dec_layers 6 \
     --batch_size 32 \
-    --lr 5e-5 \
-    --epochs 60 \
-    --weight_decay 1e-4 \
-    --label_loss_coef 5.0 \
-    --span_loss_coef 2.0 \
-    --giou_loss_coef 2.0 \
-    --quality_loss_coef 1.0 \
-    --recfw_loss_coef 0.0 \
-    --lw_saliency 1.0 \
-    --resume ./checkpoints/charades_enhanced/checkpoint_best_r1_07.pth
-    
-    python main.py \
-    --dataset_name charades \
-    --feature_dir /root/autodl-tmp/paper/data/charades/features/slowfast_feats_1fps/ \
-    --clip_visual_path /root/autodl-tmp/paper/data/charades/features/clip_feats_1fps/ \
-    --annotation_path /root/autodl-tmp/paper/data/charades/annotations/charades_sta_train.txt \
-    --save_dir ./checkpoints/charades_final_saliency_boost \
-    --text_encoder_type precomputed \
-    --v_feat_dim 2816 \
-    --feature_fps 1 \
-    --max_v_l 75 \
-    --max_q_l 32 \
     --hidden_dim 384 \
-    --num_queries 16 \
-    --dec_layers 6 \
-    --batch_size 32 \
-    --lr 5e-5 \
+    --dec_layers 4 \
+    --num_queries 15 \
+    --device cuda \
+    --resume ./checkpoints/SEARCH_BEST_MODEL.pth \
+    --start_epoch 0 \
     --epochs 50 \
-    --lr_drop 30 \
-    --weight_decay 1e-4 \
-    --label_loss_coef 8.0 \
-    --span_loss_coef 2.0 \
-    --giou_loss_coef 2.0 \
-    --quality_loss_coef 1.0 \
-    --recfw_loss_coef 0.0 \
-    --lw_saliency 5.0 \
-    --resume ./checkpoints/charades_enhanced/checkpoint_best_r1_07.pth
-
-#eval_search.py
-python eval_search.py \
-    --resume ./checkpoints/charades_enhanced/checkpoint_best_r1_07.pth \
-    --dataset_name charades \
-    --feature_dir /root/autodl-tmp/paper/data/charades/features/slowfast_feats_1fps/ \
-    --clip_visual_path /root/autodl-tmp/paper/data/charades/features/clip_feats_1fps/ \
-    --annotation_path /root/autodl-tmp/paper/data/charades/annotations/charades_sta_train.txt \
-    --save_dir ./checkpoints/charades_enhanced \
-    --text_encoder_type precomputed \
-    --batch_size 32
+    --lr 1e-5 \
+    --weight_decay 5e-5 \
+    --span_loss_coef 4 \
+    --giou_loss_coef 2 \
+    --quality_loss_coef 2.0 \
+    --lw_saliency 10.0 \
+    --isp_loss_coef 1.0 \
+    --label_loss_coef 4.0 \
+    --recfw_loss_coef 0.05
     
+    
+    python main.py --dataset_name charades --feature_dir /root/autodl-tmp/paper/data/charades/features/slowfast_feats_1fps/ --clip_visual_path /root/autodl-tmp/paper/data/charades/features/clip_feats_1fps/ --annotation_path /root/autodl-tmp/paper/data/charades/annotations/charades_sta_train.txt --save_dir ./checkpoints/charades_enhanced --text_encoder_type precomputed --device cuda --cached_text_path ./data/charades/charades_clip_text_features.pt --hidden_dim 384 --dec_layers 6 --num_queries 15 --v_feat_dim 2816 --feature_fps 1 --max_v_l 75 --max_q_l 32 --batch_size 32 --epochs 150 --lr 5e-5 --weight_decay 5e-5 --span_loss_coef 4 --giou_loss_coef 2 --quality_loss_coef 2.0 --lw_saliency 10.0 --isp_loss_coef 1.0 --label_loss_coef 4.0 --recfw_loss_coef 0.05 && /usr/bin/shutdown
