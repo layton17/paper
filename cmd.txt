@@ -46,3 +46,6 @@ python main.py \
     
     
     python main.py --dataset_name charades --feature_dir /root/autodl-tmp/paper/data/charades/features/slowfast_feats_1fps/ --clip_visual_path /root/autodl-tmp/paper/data/charades/features/clip_feats_1fps/ --annotation_path /root/autodl-tmp/paper/data/charades/annotations/charades_sta_train.txt --save_dir ./checkpoints/charades_enhanced --text_encoder_type precomputed --device cuda --cached_text_path ./data/charades/charades_clip_text_features.pt --hidden_dim 384 --dec_layers 6 --num_queries 15 --v_feat_dim 2816 --feature_fps 1 --max_v_l 75 --max_q_l 32 --batch_size 32 --epochs 150 --lr 5e-5 --weight_decay 5e-5 --span_loss_coef 4 --giou_loss_coef 2 --quality_loss_coef 2.0 --lw_saliency 10.0 --isp_loss_coef 1.0 --label_loss_coef 4.0 --recfw_loss_coef 0.05 && /usr/bin/shutdown
+    
+    
+    

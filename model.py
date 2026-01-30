@@ -26,14 +26,11 @@ def inverse_sigmoid(x, eps=1e-3):
     x2 = (1 - x).clamp(min=eps)
     return torch.log(x1/x2)
 
-
 class MultiContextPerception(nn.Module):
-    """完全保持原样"""
     def __init__(self, hidden_dim, nhead=8, dropout=0.1, dataset_name='charades'):
         super().__init__()
         self.hidden_dim = hidden_dim
         self.nhead = nhead
-        
         self.wts_lin = nn.Linear(hidden_dim, 1)
         self.ec_attn = nn.MultiheadAttention(hidden_dim, nhead, dropout=dropout)
         self.ec_norm = nn.LayerNorm(hidden_dim)
@@ -47,10 +44,8 @@ class MultiContextPerception(nn.Module):
             nn.MultiheadAttention(hidden_dim, nhead, dropout=dropout)
             for _ in range(len(self.stride_groups))
         ])
-        
         self.cc_norm = nn.LayerNorm(hidden_dim)
         self.fusion_norm = nn.LayerNorm(hidden_dim)
-        
         self.dropout = nn.Dropout(dropout)
         self.linear1 = nn.Linear(hidden_dim, hidden_dim * 4)
         self.linear2 = nn.Linear(hidden_dim * 4, hidden_dim)
@@ -108,150 +103,65 @@ class MultiContextPerception(nn.Module):
             keys, mask = get_pooled_keys_and_mask(strides, video_mask)
             cc_out, _ = self.cc_attns[i](x, keys, keys, key_padding_mask=mask)
             total_cc_out = total_cc_out + cc_out
-        
         x_cc = self.cc_norm(x + self.dropout(total_cc_out))
         out = x_ec + x_cc
         out2 = self.linear2(self.dropout(self.activation(self.linear1(out))))
         return self.fusion_norm(out + self.dropout(out2))
 
-
 class MESM_W2W_BAM_MinimalFix(nn.Module):
-    """
-    最小改动版本：只修复bbox_embed，其他完全保持原样
-    """
     def __init__(self, args, text_encoder=None):
         super().__init__()
         self.args = args
         self.hidden_dim = args.hidden_dim
-        
         self.text_encoder = text_encoder
-        self.input_txt_proj = nn.Sequential(
-            nn.LayerNorm(args.t_feat_dim),
-            nn.Linear(args.t_feat_dim, args.hidden_dim)
-        )
-        self.input_vid_proj = nn.Sequential(
-            nn.LayerNorm(args.v_feat_dim),
-            nn.Linear(args.v_feat_dim, args.hidden_dim * 2),
-            nn.ReLU(),
-            nn.Dropout(0.1),  # 加一点 Dropout 防止过拟合
-            nn.Linear(args.hidden_dim * 2, args.hidden_dim)
-        )
-        
+        self.input_txt_proj = nn.Sequential(nn.LayerNorm(args.t_feat_dim), nn.Linear(args.t_feat_dim, args.hidden_dim))
+        self.input_vid_proj = nn.Sequential(nn.LayerNorm(args.v_feat_dim), nn.Linear(args.v_feat_dim, args.hidden_dim * 2), nn.ReLU(), nn.Dropout(0.1), nn.Linear(args.hidden_dim * 2, args.hidden_dim))
         self.vid_pos_embed, _ = build_position_encoding(args)
         self.txt_pos_embed = nn.Embedding(args.max_q_l, args.hidden_dim)
-
         enhance_layer = T2V_TransformerEncoderLayer(args.hidden_dim, args.nheads)
         self.enhance_encoder = T2V_TransformerEncoder(enhance_layer, num_layers=2)
-        
         align_layer = T2V_TransformerEncoderLayer(args.hidden_dim, args.nheads)
         self.t2v_encoder = T2V_TransformerEncoder(align_layer, num_layers=3)
-
         self.rec_fw = getattr(args, 'rec_fw', True)
         self.vocab_size = getattr(args, 'vocab_size', 49408)
-        
         if self.rec_fw:
             self.masked_token = nn.Parameter(torch.randn(args.hidden_dim), requires_grad=True)
-            self.output_txt_proj = nn.Sequential(
-                nn.LayerNorm(args.hidden_dim),
-                nn.Linear(args.hidden_dim, args.hidden_dim),
-                nn.ReLU(),
-                nn.Linear(args.hidden_dim, self.vocab_size)
-            )
-
+            self.output_txt_proj = nn.Sequential(nn.LayerNorm(args.hidden_dim), nn.Linear(args.hidden_dim, args.hidden_dim), nn.ReLU(), nn.Linear(args.hidden_dim, self.vocab_size))
         dataset_name = getattr(args, 'dataset_name', 'charades')
         self.w2w_context = MultiContextPerception(args.hidden_dim, args.nheads, dataset_name=dataset_name)
-        
-        # 保持原有模块配置
         num_clusters = getattr(args, 'num_clusters', 8)
         self.use_vcc = getattr(args, 'use_vcc', True)
         if self.use_vcc:
-            self.video_clustering = VideoContextClustering(
-                hidden_dim=args.hidden_dim,
-                num_clusters=num_clusters,
-                nhead=args.nheads,
-                dropout=0.1
-            )
-        
+            self.video_clustering = VideoContextClustering(hidden_dim=args.hidden_dim, num_clusters=num_clusters, nhead=args.nheads, dropout=0.1)
         self.use_kwd = getattr(args, 'use_kwd', True)
         if self.use_kwd:
-            self.keyword_detector = KeywordWeightDetection(
-                hidden_dim=args.hidden_dim,
-                nhead=args.nheads,
-                dropout=0.1
-            )
-        
+            self.keyword_detector = KeywordWeightDetection(hidden_dim=args.hidden_dim, nhead=args.nheads, dropout=0.1)
         self.use_csm = getattr(args, 'use_csm', True)
         num_csm_layers = getattr(args, 'num_csm_layers', 2)
         self.num_clips_for_mining = getattr(args, 'num_clips_for_mining', 4)
         if self.use_csm:
-            self.clip_semantic_mining = ClipSemanticMining(
-                hidden_dim=args.hidden_dim,
-                nhead=args.nheads,
-                num_layers=num_csm_layers,
-                dropout=0.1
-            )
-        
-        self.fusion_layer = nn.Sequential(
-            nn.Linear(args.hidden_dim * 2, args.hidden_dim),
-            nn.LayerNorm(args.hidden_dim),
-            nn.ReLU(),
-            nn.Dropout(0.1),
-            nn.Linear(args.hidden_dim, args.hidden_dim)
-        )
-        
-        self.gate_predictor = nn.Sequential(
-            nn.Linear(args.hidden_dim, args.hidden_dim),
-            nn.ReLU(),
-            nn.Linear(args.hidden_dim, args.hidden_dim),
-            nn.Sigmoid() 
-        )
+            self.clip_semantic_mining = ClipSemanticMining(hidden_dim=args.hidden_dim, nhead=args.nheads, num_layers=num_csm_layers, dropout=0.1)
+        self.fusion_layer = nn.Sequential(nn.Linear(args.hidden_dim * 2, args.hidden_dim), nn.LayerNorm(args.hidden_dim), nn.ReLU(), nn.Dropout(0.1), nn.Linear(args.hidden_dim, args.hidden_dim))
+        self.gate_predictor = nn.Sequential(nn.Linear(args.hidden_dim, args.hidden_dim), nn.ReLU(), nn.Linear(args.hidden_dim, args.hidden_dim), nn.Sigmoid())
         self.gate_predictor[-2].bias.data.fill_(-2.0)
-
         bam_layer = TransformerDecoderLayer(args.hidden_dim, args.nheads)
         boundary_layer = BoundaryDecoderLayer(args.hidden_dim, nhead=args.nheads)
-        
-        self.transformer_decoder = TransformerDecoder(
-            bam_layer, 
-            boundary_layer, 
-            args.dec_layers, 
-            args.hidden_dim, 
-            args.nheads, 
-            return_intermediate=True
-        )
-        
-        # ========== [唯一的修复] 启用 bbox_embed ==========
-        self.transformer_decoder.bbox_embed = nn.ModuleList([
-            MLP(args.hidden_dim, args.hidden_dim, 2, 3) 
-            for _ in range(args.dec_layers)
-        ])
-        # 关键：初始化为小值，让初始输出接近0（即不改变reference）
+        self.transformer_decoder = TransformerDecoder(bam_layer, boundary_layer, args.dec_layers, args.hidden_dim, args.nheads, return_intermediate=True)
+        self.transformer_decoder.bbox_embed = nn.ModuleList([MLP(args.hidden_dim, args.hidden_dim, 2, 3) for _ in range(args.dec_layers)])
         for bbox_mlp in self.transformer_decoder.bbox_embed:
             nn.init.constant_(bbox_mlp.layers[-1].weight, 0)
             nn.init.constant_(bbox_mlp.layers[-1].bias, 0)
-        # ========== [修复结束] ==========
-        
         self.query_embed = nn.Embedding(args.num_queries, 3)      
         self.class_embed = nn.Linear(args.hidden_dim, 2)
-        
         self.quality_proj = MLP(args.hidden_dim, args.hidden_dim * 2, 1, 3)
         self.span_embed = MLP(args.hidden_dim, args.hidden_dim, 2, 3)
-        
-        self.saliency_proj = nn.Sequential(
-            nn.Conv1d(args.hidden_dim, args.hidden_dim, kernel_size=3, padding=1),
-            nn.GroupNorm(32, args.hidden_dim),
-            nn.ReLU(),
-            nn.Conv1d(args.hidden_dim, args.hidden_dim, kernel_size=1),
-            nn.ReLU(),
-            nn.Conv1d(args.hidden_dim, 1, kernel_size=1)
-        )
-
+        self.saliency_proj = nn.Sequential(nn.Conv1d(args.hidden_dim, args.hidden_dim, kernel_size=3, padding=1), nn.GroupNorm(32, args.hidden_dim), nn.ReLU(), nn.Conv1d(args.hidden_dim, args.hidden_dim, kernel_size=1), nn.ReLU(), nn.Conv1d(args.hidden_dim, 1, kernel_size=1))
         kernel_size = 5
         sigma = 1.0
         x = torch.arange(kernel_size).float() - kernel_size // 2
         gaussian = torch.exp(-x ** 2 / (2 * sigma ** 2))
         gaussian = gaussian / gaussian.sum()
         self.register_buffer('gaussian_kernel', gaussian)
-
         self.txt_con_proj = nn.Linear(args.hidden_dim, args.hidden_dim)
         self.vid_con_proj = nn.Linear(args.hidden_dim, args.hidden_dim)
 
@@ -268,194 +178,94 @@ class MESM_W2W_BAM_MinimalFix(nn.Module):
         return masked_words.permute(1, 0, 2), mask_selection
 
     def forward(self, video_feat, video_mask, words_id, words_mask, is_training=False):
-        # 以下完全保持你原来的forward逻辑
-        
-        # 0. Anchor约束
-        self.query_embed.weight.data[..., 1] = torch.minimum(
-            self.query_embed.weight[..., 0], 
-            self.query_embed.weight[..., 1]
-        )
+        self.query_embed.weight.data[..., 1] = torch.minimum(self.query_embed.weight[..., 0], self.query_embed.weight[..., 1])
         p_prob = self.query_embed.weight[..., 0].sigmoid().clamp(min=1e-4, max=1-1e-4) 
         limit_right = inverse_sigmoid(1.0 - p_prob)
-        self.query_embed.weight.data[..., 2] = torch.minimum(
-            limit_right, 
-            self.query_embed.weight[..., 2]
-        )
-
-        # 1. Encoding
+        self.query_embed.weight.data[..., 2] = torch.minimum(limit_right, self.query_embed.weight[..., 2])
         if self.text_encoder:
             txt_out = self.text_encoder(words_id)
-            if isinstance(txt_out, dict):
-                words_feat = txt_out['last_hidden_state']
-            else:
-                words_feat = txt_out 
-        else:
-            words_feat = words_id
-            
+            if isinstance(txt_out, dict): words_feat = txt_out['last_hidden_state']
+            else: words_feat = txt_out 
+        else: words_feat = words_id
         src_txt = self.input_txt_proj(words_feat).permute(1, 0, 2)
         src_vid = self.input_vid_proj(video_feat).permute(1, 0, 2)
-        
         pos_v = self.vid_pos_embed(src_vid.permute(1, 0, 2), video_mask).permute(1, 0, 2)
         pos_t = self.txt_pos_embed.weight[:src_txt.shape[0]].unsqueeze(1).repeat(1, src_txt.shape[1], 1)
-
         word_weights = None
-        if self.use_kwd:
-            src_txt, word_weights = self.keyword_detector(src_txt, words_mask)
-
-        enhanced_vid = self.enhance_encoder(
-            query=src_vid, key=src_txt, 
-            key_padding_mask=~words_mask, 
-            pos_q=pos_v, pos_k=pos_t
-        )
-        
+        if self.use_kwd: src_txt, word_weights = self.keyword_detector(src_txt, words_mask)
+        enhanced_vid = self.enhance_encoder(query=src_vid, key=src_txt, key_padding_mask=~words_mask, pos_q=pos_v, pos_k=pos_t)
         isp_video_feat = enhanced_vid.permute(1, 0, 2)
         isp_text_feat = src_txt.permute(1, 0, 2)
-        
         recfw_words_logit = None
         masked_indices = None
         if self.rec_fw and is_training:
             masked_src_txt, mask_selection = self._mask_words(src_txt, words_mask, self.masked_token)
             masked_indices = mask_selection
-            rec_out_text_len = self.enhance_encoder(
-                query=masked_src_txt, key=src_vid,
-                key_padding_mask=~video_mask, 
-                pos_q=pos_t, pos_k=pos_v
-            )
+            rec_out_text_len = self.enhance_encoder(query=masked_src_txt, key=src_vid, key_padding_mask=~video_mask, pos_q=pos_t, pos_k=pos_v)
             recfw_words_logit = self.output_txt_proj(rec_out_text_len).permute(1, 0, 2)
-
-        f_aligned = self.t2v_encoder(
-            query=enhanced_vid, key=src_txt, 
-            key_padding_mask=~words_mask, 
-            pos_q=pos_v, pos_k=pos_t
-        )
-
+        f_aligned = self.t2v_encoder(query=enhanced_vid, key=src_txt, key_padding_mask=~words_mask, pos_q=pos_v, pos_k=pos_t)
         cluster_info = None
-        if self.use_vcc:
-            f_aligned, cluster_info = self.video_clustering(f_aligned, video_mask)
-
+        if self.use_vcc: f_aligned, cluster_info = self.video_clustering(f_aligned, video_mask)
         f_raw = f_aligned
-        f_w2w = self.w2w_context(
-            x=f_aligned, txt_feat=src_txt, video_mask=video_mask, txt_mask=words_mask
-        )
-        
+        f_w2w = self.w2w_context(x=f_aligned, txt_feat=src_txt, video_mask=video_mask, txt_mask=words_mask)
         mining_info = None
-        if self.use_csm:
-            f_w2w, mining_info = self.clip_semantic_mining(
-                video_feat=f_w2w,
-                text_feat=src_txt,
-                video_mask=video_mask,
-                text_mask=words_mask,
-                num_clips=self.num_clips_for_mining
-            )
-        
+        if self.use_csm: f_w2w, mining_info = self.clip_semantic_mining(video_feat=f_w2w, text_feat=src_txt, video_mask=video_mask, text_mask=words_mask, num_clips=self.num_clips_for_mining)
         f_concat = torch.cat([f_raw, f_w2w], dim=-1) 
         f_fused = self.fusion_layer(f_concat)        
-        
         txt_mask_float = words_mask.float().unsqueeze(-1)
         global_txt = (src_txt.permute(1,0,2) * txt_mask_float).sum(dim=1) / (txt_mask_float.sum(dim=1) + 1e-6) 
-        
         channel_gate = self.gate_predictor(global_txt).unsqueeze(0) 
         f_context = f_raw + channel_gate * f_fused
-        
-        # 2. Anchor Generation
         memory = f_context.permute(1, 0, 2) 
         saliency_in = memory.permute(0, 2, 1) 
         saliency_scores = self.saliency_proj(saliency_in).squeeze(1)
         if torch.isnan(saliency_scores).any() or torch.isinf(saliency_scores).any():
             saliency_scores = torch.nan_to_num(saliency_scores, nan=0.0, posinf=100.0, neginf=-100.0)
-        
         num_q = self.args.num_queries
         num_static = num_q // 2
         num_dynamic = num_q - num_static
-        
-        static_anchor_params = self.query_embed.weight[:num_static]
-        static_prob = static_anchor_params.sigmoid()
-        static_centers = static_prob[..., 0]
-        static_widths = static_prob[..., 1:] 
-        
         saliency_probs = saliency_scores.sigmoid()
-        if video_mask is not None:
-            saliency_probs = saliency_probs * video_mask.float()
-        
-        B, L = saliency_probs.shape
+        if video_mask is not None: saliency_probs = saliency_probs * video_mask.float()
         k_size = len(self.gaussian_kernel)
         pad = k_size // 2
-        
         sal_reshaped = saliency_probs.unsqueeze(1)
         sal_padded = F.pad(sal_reshaped, (pad, pad), mode='replicate')
         kernel_reshaped = self.gaussian_kernel.view(1, 1, -1)
-        
         smooth_sal = F.conv1d(sal_padded, kernel_reshaped).squeeze(1)
         refined_sal = 0.7 * smooth_sal + 0.3 * saliency_probs
-        
         padded_sal = F.pad(refined_sal.unsqueeze(1), (1, 1), mode='constant', value=0).squeeze(1)
         is_peak = (refined_sal > padded_sal[:, :-2]) & (refined_sal > padded_sal[:, 2:])
         peak_scores = refined_sal * is_peak.float()
-        
-        # ========== 混合锚点策略 (Hybrid Anchors) ==========
-        # 目的：防止训练初期 Saliency 乱猜导致模型难以收敛
-        
         num_queries = self.args.num_queries
-        num_fixed = num_queries // 2             # 一半做固定锚点 (e.g., 7个)
-        num_dynamic = num_queries - num_fixed    # 一半做动态锚点 (e.g., 8个)
-        
-        # --- A. 动态锚点 (来自 Saliency Top-K) ---
+        num_fixed = num_queries // 2
+        num_dynamic = num_queries - num_fixed
         topk_scores, topk_indices = torch.topk(peak_scores, num_dynamic, dim=1) 
-        
         L_feat = memory.shape[1]
         dynamic_centers = (topk_indices.float() + 0.5) / L_feat 
         dynamic_centers = dynamic_centers.clamp(min=0.01, max=0.99)
-        
-        # 动态锚点的宽度 (使用 Query Embed 的前半部分)
         dynamic_widths = self.query_embed.weight[:num_dynamic].sigmoid()[..., 1:] 
         dynamic_widths = dynamic_widths.unsqueeze(0).expand(memory.shape[0], -1, -1)
-        
-        # --- B. 固定锚点 (均匀分布) ---
-        # 在 0-1 之间均匀生成锚点，例如: [0.1, 0.25, ..., 0.9]
-        # 注意要用 device
         fixed_centers_val = torch.linspace(0.05, 0.95, steps=num_fixed, device=memory.device)
-        fixed_centers = fixed_centers_val.unsqueeze(0).expand(memory.shape[0], -1) # [B, N_fixed]
-        
-        # 固定锚点的宽度 (使用 Query Embed 的后半部分)
+        fixed_centers = fixed_centers_val.unsqueeze(0).expand(memory.shape[0], -1)
         fixed_widths = self.query_embed.weight[num_dynamic:].sigmoid()[..., 1:]
         fixed_widths = fixed_widths.unsqueeze(0).expand(memory.shape[0], -1, -1)
-        
-        # --- C. 拼接 ---
-        # [B, N_dynamic + N_fixed]
         all_centers = torch.cat([dynamic_centers, fixed_centers], dim=1)  
-        # [B, N_dynamic + N_fixed, 2]
         all_widths = torch.cat([dynamic_widths, fixed_widths], dim=1)     
-        
         d_s = all_widths[..., 0]
         d_e = all_widths[..., 1]
-        
         start = (all_centers - d_s).clamp(min=1e-4, max=1-1e-4)
         end   = (all_centers + d_e).clamp(min=1e-4, max=1-1e-4)
-        
         query_pos = torch.stack([inverse_sigmoid(start), inverse_sigmoid(end)], dim=-1) 
-        
-        # ==========================================================
-        
-        # 3. Decoder
-        tgt = torch.zeros((num_q, memory.shape[0], self.hidden_dim), 
-                          device=memory.device, dtype=memory.dtype)
-
-        hs, refs, boundary_mem = self.transformer_decoder(
-            tgt, f_context, memory_key_padding_mask=~video_mask, 
-            pos=pos_v, refpoints_unsigmoid=query_pos
-        )
-
+        tgt = torch.zeros((num_q, memory.shape[0], self.hidden_dim), device=memory.device, dtype=memory.dtype)
+        hs, refs, boundary_mem = self.transformer_decoder(tgt, f_context, memory_key_padding_mask=~video_mask, pos=pos_v, refpoints_unsigmoid=query_pos)
         outputs_class = torch.stack([self.class_embed(hs[i]) for i in range(len(hs))])
         outputs_quality = torch.stack([self.quality_proj(hs[i]) for i in range(len(hs))])
         outputs_coord = refs 
-
-        # 4. Contrastive & Output
         proj_txt_emb = self.txt_con_proj(global_txt) 
         vid_query_feat = hs[-1].permute(1, 0, 2)
         proj_vid_emb = self.vid_con_proj(vid_query_feat) 
         proj_txt_emb = F.normalize(proj_txt_emb, p=2, dim=-1)
         proj_vid_emb = F.normalize(proj_vid_emb, p=2, dim=-1)
-
         out = {
             'pred_logits': outputs_class[-1].permute(1, 0, 2), 
             'pred_spans': outputs_coord[-1], 
@@ -473,17 +283,8 @@ class MESM_W2W_BAM_MinimalFix(nn.Module):
             'mining_info': mining_info,
             'word_weights': word_weights
         }
-        
         if self.args.aux_loss:
-             out['aux_outputs'] = [
-                {
-                    'pred_logits': a.permute(1, 0, 2), 
-                    'pred_spans': b,
-                    'pred_quality': c.permute(1, 0, 2)
-                }
-                for a, b, c in zip(outputs_class[:-1], outputs_coord[:-1], outputs_quality[:-1])
-            ]
-            
+             out['aux_outputs'] = [{'pred_logits': a.permute(1, 0, 2), 'pred_spans': b, 'pred_quality': c.permute(1, 0, 2)} for a, b, c in zip(outputs_class[:-1], outputs_coord[:-1], outputs_quality[:-1])]
         return out
 
 

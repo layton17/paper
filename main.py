@@ -42,9 +42,15 @@ def train_one_epoch(model, criterion, data_loader, optimizer, device, epoch):
     model.train()
     criterion.train()
     
-    total_loss = 0
+    # ========== [动态 ISP 温度计算] ==========
+    # 策略：从 0.07 指数衰减到 0.01 (在 Epoch 50)
+    initial_temp = getattr(model.args, 'isp_temperature', 0.07)
+    decay_factor = 0.96 
+    isp_temp = max(0.01, initial_temp * (decay_factor ** epoch))
+    logger.info(f"Epoch {epoch} ISP Temperature: {isp_temp:.5f}")
+    # ========================================
     
-    # [统计变量初始化] - 确保初始化所有 8 个 Loss
+    total_loss = 0
     total_span_loss = 0
     total_giou_loss = 0
     total_label_loss = 0
@@ -52,6 +58,7 @@ def train_one_epoch(model, criterion, data_loader, optimizer, device, epoch):
     total_cont_loss = 0
     total_saliency_loss = 0
     total_recfw_loss = 0   
+    total_recss_loss = 0 # SSMESM
     total_isp_loss = 0
     
     pbar = tqdm(enumerate(data_loader), total=len(data_loader), desc=f"Epoch {epoch} Train")
@@ -63,17 +70,14 @@ def train_one_epoch(model, criterion, data_loader, optimizer, device, epoch):
         words_mask = batch['words_mask'].to(device)
         targets = [{k: v.to(device) if isinstance(v, torch.Tensor) else v for k, v in t.items()} for t in batch['targets']]
 
-        # Forward
         outputs = model(video_feat, video_mask, words_id, words_mask, is_training=True)
         
-        # Loss Calculation
-        loss_dict = criterion(outputs, targets)
+        # 传递 isp_temperature
+        loss_dict = criterion(outputs, targets, isp_temperature=isp_temp)
         weight_dict = criterion.weight_dict
         
-        # 计算加权总 Loss
         losses = sum(loss_dict[k] * weight_dict[k] for k in loss_dict.keys() if k in weight_dict)
 
-        # Backward
         optimizer.zero_grad()
         losses.backward()
         if hasattr(model.args, 'clip_max_norm') and model.args.clip_max_norm > 0:
@@ -82,38 +86,36 @@ def train_one_epoch(model, criterion, data_loader, optimizer, device, epoch):
         
         total_loss += losses.item()
         
-        # [提取所有 Loss]
         l_span = loss_dict.get('loss_span', torch.tensor(0.0)).item()
         l_giou = loss_dict.get('loss_giou', torch.tensor(0.0)).item()
         l_label = loss_dict.get('loss_labels', torch.tensor(0.0)).item()
         l_qual = loss_dict.get('loss_quality', torch.tensor(0.0)).item()
         l_cont = loss_dict.get('loss_contrastive', torch.tensor(0.0)).item()
         l_sal = loss_dict.get('loss_saliency', torch.tensor(0.0)).item()
-        l_rec = loss_dict.get('loss_recfw', torch.tensor(0.0)).item()    
+        l_rec = loss_dict.get('loss_recfw', torch.tensor(0.0)).item()
+        l_recss = loss_dict.get('loss_recss', torch.tensor(0.0)).item()
         l_isp = loss_dict.get('loss_isp', torch.tensor(0.0)).item()
         
-        # [累加统计]
         total_span_loss += l_span
         total_giou_loss += l_giou
         total_label_loss += l_label
         total_quality_loss += l_qual
         total_cont_loss += l_cont
         total_saliency_loss += l_sal
-        total_recfw_loss += l_rec    
+        total_recfw_loss += l_rec 
+        total_recss_loss += l_recss
         total_isp_loss += l_isp
         
         pbar.set_postfix({
             'Loss': f"{losses.item():.2f}",     
             'Span': f"{l_span:.2f}",
             'IoU': f"{l_giou:.2f}",
-            'Cls': f"{l_label:.2f}",
+            'RecSS': f"{l_recss:.3f}",
             'ISP': f"{l_isp:.3f}"
         })
     
-    # [计算 Epoch 平均值]
     num_batches = len(data_loader)
     avg_loss = total_loss / num_batches
-    
     avg_span = total_span_loss / num_batches
     avg_giou = total_giou_loss / num_batches
     avg_label = total_label_loss / num_batches
@@ -121,14 +123,16 @@ def train_one_epoch(model, criterion, data_loader, optimizer, device, epoch):
     avg_cont = total_cont_loss / num_batches
     avg_sal = total_saliency_loss / num_batches
     avg_rec = total_recfw_loss / num_batches   
+    avg_recss = total_recss_loss / num_batches
     avg_isp = total_isp_loss / num_batches
     
     logger.info(
-        f"Epoch [{epoch}] Avg Loss: {avg_loss:.4f}\n"
-        f"  - Label: {avg_label:.4f} | Quality: {avg_qual:.4f}\n"
-        f"  - Span:  {avg_span:.4f}  | GIoU:    {avg_giou:.4f}\n"
-        f"  - Sal:   {avg_sal:.4f}   | Cont:    {avg_cont:.4f}\n"
-        f"  - Rec:   {avg_rec:.4f}   | ISP:     {avg_isp:.4f}"
+        f"Epoch [{epoch}] Avg Loss: {avg_loss:.4f}"
+        f"  - Label: {avg_label:.4f} | Quality: {avg_qual:.4f}"
+        f"  - Span:  {avg_span:.4f}  | GIoU:    {avg_giou:.4f}"
+        f"  - Sal:   {avg_sal:.4f}   | Cont:    {avg_cont:.4f}"
+        f"  - RecFW: {avg_rec:.4f}   | RecSS:   {avg_recss:.4f}"
+        f"  - ISP:   {avg_isp:.4f}"
     )
     
     return avg_loss
@@ -269,7 +273,8 @@ def main(args):
         'loss_saliency': args.lw_saliency, 
         'loss_contrastive': args.eos_coef, 
         'loss_recfw': args.recfw_loss_coef,
-        'loss_isp': getattr(args, 'isp_loss_coef', 1.0)
+        'loss_isp': getattr(args, 'isp_loss_coef', 1.0),
+        'loss_recss': args.recss_loss_coef,
     }
 
     if args.aux_loss:
@@ -278,7 +283,7 @@ def main(args):
             aux_weight_dict.update({k + f'_{i}': v for k, v in weight_dict.items()})
         weight_dict.update(aux_weight_dict)
 
-    losses = ['labels', 'spans', 'quality', 'recfw', 'saliency', 'isp'] 
+    losses = ['labels', 'spans', 'quality', 'recfw', 'recss', 'saliency', 'isp'] 
     criterion = SetCriterion(matcher, weight_dict, losses=losses, eos_coef=args.eos_coef)
     criterion.to(device)
 
@@ -352,12 +357,12 @@ def main(args):
         bbox_lr = optimizer.param_groups[1]['lr'] if len(optimizer.param_groups) > 1 else current_lr
         logger.info(f"Epoch {epoch} LR: {current_lr:.2e} | bbox_embed LR: {bbox_lr:.2e}")
         
-        # Loss Decay: 训练后期关闭辅助任务
-        if epoch >= 50 and criterion.weight_dict['loss_recfw'] > 0:
-            logger.info(f"Epoch {epoch}: Dropping RecFW Loss weight to 0.0!")
+        if epoch >= 50 and (criterion.weight_dict.get('loss_recfw', 0) > 0 or criterion.weight_dict.get('loss_recss', 0) > 0):
+            logger.info(f"Epoch {epoch}: Dropping Reconstruction Losses (RecFW & RecSS) to 0.0!")
             criterion.weight_dict['loss_recfw'] = 0.0
+            criterion.weight_dict['loss_recss'] = 0.0
             for k in criterion.weight_dict.keys():
-                if 'recfw' in k:
+                if 'recfw' in k or 'recss' in k:
                     criterion.weight_dict[k] = 0.0
 
         train_one_epoch(model, criterion, dataloader_train, optimizer, device, epoch)
